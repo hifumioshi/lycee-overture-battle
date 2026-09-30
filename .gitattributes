@@ -1,0 +1,22 @@
+# 统一行尾，避免跨平台提交产生大量"假差异"
+* text=auto eol=lf
+
+# Windows 脚本与批处理保留 CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# 二进制文件（不参与行尾转换与文本 diff）
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.mp3 binary
+*.m4a binary
+*.wav binary
+*.ogg binary
+*.flac binary
+*.exe binary
+*.zip binary
+*.pdf binary
