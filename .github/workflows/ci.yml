@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: 安装依赖
+        run: npm ci
+
+      - name: 类型检查（渲染端）
+        run: npx tsc --noEmit
+
+      - name: 类型检查（主进程）
+        run: npx tsc -p tsconfig.electron.json --noEmit
+
+      - name: 规则引擎测试
+        run: npx tsx tools/test-rules.ts
+
+      - name: 增量同步测试
+        run: npx tsx tools/test-gssync.ts
+
+      - name: 语音映射测试
+        run: npx tsx tools/test-voice.ts
+
+      - name: 语音行为接线测试
+        run: npx tsx tools/test-voice-actions.ts
+
+      - name: 中继协议测试
+        run: npx tsx tools/test-relay.mjs
+
+      - name: 构建
+        run: npm run build

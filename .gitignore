@@ -1,0 +1,28 @@
+# ===== 依赖与构建产物（不入库）=====
+node_modules/
+dist/
+dist-electron/
+release/
+
+# ===== 版权素材：卡图 / 语音 / 战歌（不入库，用 tools/download-cards.mjs 自行获取）=====
+data/images/
+data/voices/
+data/songs/
+public/images/
+
+# ===== 卡牌数据：只保留应用用到的区间数据（range.json 入库，便于跑测试）=====
+data/cards/lycee.csv
+data/cards/cards.json
+
+# ===== 本机运行数据 / 备份 / 截图 =====
+data/user-data/
+tools/data-backup/
+tools/_shots/
+tools/rule-html/
+tools/rulebook-pages/
+public/cards.json
+
+# ===== 杂项 =====
+*.log
+.DS_Store
+Thumbs.db
