@@ -19,10 +19,10 @@ import { getParsed } from '../core/effectEngine';
 import { effectiveStats as engStats } from '../core/effectEngine';
 import { hasHandDeclare, hasDeclare, hasMoveAbility } from '../core/abilities';
 import * as rules from '../core/rules';
-import { applyAction, canGuestAct, promptOwner, NetAction, NetState, NetRoomState, NetMode } from '../net/protocol';
+import { applyAction, canGuestAct, promptOwner, NetAction, NetState, NetHash, NetAck, NetOp, NetRevReport, NetDesync, NetDesyncReport, NetRoomState, NetMode } from '../net/protocol';
 import * as relay from '../net/relay';
 import { foldersOf, pickVariant } from '../core/voice';
-import { encodeState, decodeState, resetEncode, resetDecode, packetSize, fullSize } from '../net/gsSync';
+import { encodeState, decodeState, resetEncode, resetDecode, packetSize, fullSize, stateHash, stateSlotHashes, hashHex, divergentSlots, currentRev, currentSeq, currentDecodeRev } from '../net/gsSync';
 import type { VoiceCue } from '../core/game';
 import { RoomState, createRoom, roomAddClient, roomRemoveClient, roomSit, roomStand, roomReady, roomUnready, roomSetDeck, bothReady, roomStartGame, roomRematch, seatOf, HOST_CID } from '../core/room';
 import RoomLobby from './RoomLobby';
@@ -194,11 +194,47 @@ export default function Battlefield({
   const gsRef = useRef(gs);
   useEffect(() => {
     gsRef.current = gs;
+    gsLiveRef.current = gs; // 任何 setGs（含直接用 setGs 的地方）都要同步到「即时副本」
   }, [gs]);
+  /** 权威状态的即时副本：房主/单机所有改动同步写这里（不等 React 渲染），避免发包/回执用到过期状态 */
+  const gsLiveRef = useRef(gs);
+  const commitGs = (next: GameState) => {
+    gsLiveRef.current = next;
+    setGs(next);
+  };
   // 增量同步：客机侧的状态基线（立即更新，不等 React 渲染）+ 最近一次重同步请求时间 + 房主侧最近发包信息
   const guestGsRef = useRef<GameState | null>(null);
   const lastResyncRef = useRef(0);
   const lastPktRef = useRef('');
+  // ===== 同步诊断 + 操作确认（对齐）=====
+  const [diag, setDiag] = useState({
+    rtt: -1, // 本机 ↔ 中继服务器往返延迟(ms)
+    rev: 0, // 我当前的状态版本
+    hash: '', // 我的校验码（8 位十六进制）
+    ok: true, // 我的校验码与房主是否一致
+    pending: 0, // 等待房主回执的操作数
+    peerRev: -1, // 对方已同步到的版本（房主视角）
+    peerOk: true, // 对方校验码是否与房主一致
+    paths: [] as string[], // 分车时不一致的字段
+    warn: '', // 红色警告文字
+    empty: 0, // 校验不一致累计次数
+  });
+  const [diagOpen, setDiagOpen] = useState(false);
+  const pktLogRef = useRef<string[]>([]);
+  const pushPktLog = (line: string) => {
+    pktLogRef.current = [`${new Date().toLocaleTimeString()} ${line}`, ...pktLogRef.current].slice(0, 10);
+  };
+  const opSeqRef = useRef(0);
+  const pendingOpsRef = useRef(new Map<string, { label: string; at: number; resent: boolean }>());
+  const [pendingLabel, setPendingLabel] = useState<string>(''); // 等待房主确认的提示文字
+  const guestRevReportAtRef = useRef(0);
+  const doneOpIdsRef = useRef<string[]>([]); // 房主：处理过的 opId（去重，防连点/重发双执行）
+  const pendingAcksRef = useRef<{ opId: string; ok: boolean; reason?: string; message?: string }[]>([]);
+  const guestRevRef = useRef<{ rev: number; hash: number }>({ rev: -1, hash: 0 });
+  const hashMismatchAtRef = useRef(0);
+  const [alignMsg, setAlignMsg] = useState<string | null>(null); // "已自动对齐"等提示
+  const staleAskRef = useRef(false); // 房主：需要给客机补发整份
+  const lastStateAtRef = useRef(0); // 房主：最近一次广播状态的时间（心跳用）
   // ===== 悔棋（Undo）：记录每次状态变化前的快照；房主/单机权威，客机通过请求让房主恢复 =====
   const undoStackRef = useRef<GameState[]>([]);
   const prevGsRef = useRef<GameState | null>(null);
@@ -438,7 +474,7 @@ export default function Battlefield({
     }
     skipUndoRecRef.current = true;
     prevGsRef.current = null;
-    setGs(structuredClone(target));
+    commitGs(structuredClone(target));
     setUndoWait(false);
     setUndoAsk(null);
     setSelected(null);
@@ -545,32 +581,58 @@ export default function Battlefield({
     }
   }, [gs.prompt, gs.turnPlayer, mode, myPlayer, isSpectatorView]);
 
-  /* ===== 统一动作入口：单机/房主本地应用；上桌客机发给房主（经中继）；观战者不可操作 ===== */
+  /* ===== 统一动作入口 =====
+     单机/房主：本地立即应用（房主是权威，不必等）
+     上桌客机：发给房主**并等待回执**（带 opId 去重 + 我看到的状态版本），期间按钮显示「等待房主…」
+     观战者：不可操作 */
   const doAction = (action: string, ...args: unknown[]) => {
     if (mode === 'guest') {
-      relay.sendTo(HOST_CID, { type: 'action', action, args } satisfies NetAction);
+      sendOp(action, args);
       return;
     }
     if (mode === 'spectator' || isSpectatorView) {
       setNetStatus('观战中：只能观看，不能操作。');
       return;
     }
-    setGs((g) => applyAction(g, action, args));
+    commitGs(applyAction(gsLiveRef.current, action, args));
+  };
+
+  /** 客机 → 房主：带确认的操作 */
+  const sendOp = (action: string, args: unknown[], label?: string) => {
+    opSeqRef.current += 1;
+    const opId = `${Date.now().toString(36)}-${opSeqRef.current}`;
+    pendingOpsRef.current.set(opId, { label: label ?? action, at: Date.now(), resent: false });
+    setPendingLabel(label ?? '');
+    setDiag((d) => ({ ...d, pending: pendingOpsRef.current.size }));
+    relay.sendTo(HOST_CID, { type: 'op', opId, action, args, rev: currentDecodeRev() } satisfies NetOp);
+    pushPktLog(`→ 操作 ${action}（opId=${opId}）`);
   };
 
   /* ===== 房主：广播房间/对局状态（经中继服务器） ===== */
-  /** 房主 → 全房：只发对局状态里变化的部分（增量；整份再也不用每次发 160KB） */
-  const sendStateAll = (g: GameState, full = false) => {
+  /** 房主 → 全房：只发对局状态里变化的部分（增量） */
+  const sendStateAll = (g: GameState, opts: { full?: boolean } = {}) => {
     if (mode !== 'host') return;
-    const pkt = encodeState(g, { full });
+    const pkt = encodeState(g, { full: opts.full });
     relay.broadcast({ type: 'state', pkt } satisfies NetState);
+    lastStateAtRef.current = Date.now();
     lastPktRef.current = `${pkt.kind} rev=${pkt.rev} ${packetSize(pkt)}B（整份 ${fullSize(g)}B）`;
+    pushPktLog(`→ 状态 ${pkt.kind} rev=${pkt.rev} seq=${pkt.seq} ${packetSize(pkt)}B ${hashHex(pkt.hash)}`);
+    setDiag((d) => ({ ...d, rev: pkt.rev, hash: hashHex(pkt.hash), ok: true }));
+    // 状态发出去之后，把「等待回执」的操作一次性确认掉（带上真正包含这次改动的版本号）
+    const acks = pendingAcksRef.current;
+    if (acks.length > 0) {
+      pendingAcksRef.current = [];
+      for (const a of acks) {
+        relay.broadcast({ type: 'ack', opId: a.opId, ok: a.ok, rev: pkt.rev, reason: a.reason, message: a.message } satisfies NetAck);
+      }
+    }
   };
-  /** 房主 → 单个客户端：整份（新加入者/请求重同步） */
+  /** 房主 → 单个客户端：整份（新加入者/请求重同步）。perRecipient 不影响全体的增量基准 */
   const sendStateTo = (cid: number, g: GameState) => {
     if (mode !== 'host') return;
-    const pkt = encodeState(g, { full: true });
+    const pkt = encodeState(g, { full: true, perRecipient: true });
     relay.sendTo(cid, { type: 'state', pkt } satisfies NetState);
+    pushPktLog(`→ 补发整份给 #${cid} rev=${pkt.rev} ${packetSize(pkt)}B`);
   };
   const hostBroadcast = (r: RoomState, msg: string) => {
     try {
@@ -581,7 +643,7 @@ export default function Battlefield({
           spectators: r.spectators.length,
         });
         relay.broadcast({ type: 'room', room: r } satisfies NetRoomState);
-        if (msg) sendStateAll(gsRef.current);
+        if (msg) sendStateAll(gsLiveRef.current);
       }
     } catch {
       /* 忽略 */
@@ -617,7 +679,7 @@ export default function Battlefield({
     });
     const offMsg = relay.onMessage((id, msg) => {
       try {
-        const m = JSON.parse(msg) as { type: string; name?: string; deck?: string[]; deckName?: string; count?: number; action?: string; args?: unknown[]; ok?: boolean; song?: string; voice?: string };
+        const m = JSON.parse(msg) as { type: string; name?: string; deck?: string[]; deckName?: string; count?: number; action?: string; args?: unknown[]; ok?: boolean; song?: string; voice?: string; opId?: string; rev?: number; hash?: number; slots?: [string, number][]; message?: string };
         const r = roomRef.current;
         if (!r) return;
         let next = r;
@@ -649,7 +711,63 @@ export default function Battlefield({
           next = roomUnready(next, id);
         } else if (m.type === 'resync') {
           // 客机基线对不上（漏包/刚进来）→ 补发整份状态
-          sendStateTo(id, gsRef.current);
+          sendStateTo(id, gsLiveRef.current);
+          return;
+        } else if (m.type === 'rev') {
+          // 客机报告"我到第几版了 + 我的校验码" → 房主界面显示对方是否已同步
+          guestRevRef.current = { rev: Number(m.rev) || 0, hash: Number(m.hash) || 0 };
+          const mine = hashHex(stateHash(gsLiveRef.current));
+          const ok = hashHex(guestRevRef.current.hash) === mine;
+          setDiag((d) => ({ ...d, peerRev: guestRevRef.current.rev, peerOk: ok }));
+          return;
+        } else if (m.type === 'desync') {
+          // 客机校验码对不上 → 房主定位分歧字段，同时补发整份让它重新对齐
+          const slots = Array.isArray(m.slots) ? (m.slots as [string, number][]) : [];
+          const paths = divergentSlots(stateSlotHashes(gsLiveRef.current), slots);
+          pushPktLog(`⚠ 分车报告：${paths.slice(0, 4).join('、') || '(字段集合不同)'}`);
+          relay.sendTo(id, {
+            type: 'desync',
+            ok: false,
+            hostHash: stateHash(gsLiveRef.current),
+            guestHash: Number(m.hash) || 0,
+            paths,
+          } satisfies NetDesyncReport);
+          sendStateTo(id, gsLiveRef.current);
+          setDiag((d) => ({ ...d, peerOk: false, warn: `对方校验码不一致，分歧字段：${paths.slice(0, 4).join('、') || '(字段集合不同)'}` }));
+          return;
+        } else if (m.type === 'op') {
+          // 带确认的操作：opId 去重（连点/重发只执行一次），rev 用来判断"你的画面是否过期"
+          const opId = String(m.opId ?? '');
+          if (!opId) return;
+          if (doneOpIdsRef.current.includes(opId)) {
+            relay.sendTo(id, { type: 'ack', opId, ok: true, rev: currentRev(), message: '（重复请求已忽略）' } satisfies NetAck);
+            return;
+          }
+          doneOpIdsRef.current = [...doneOpIdsRef.current, opId].slice(-60);
+          const seatIdx = next.seat1?.cid === id ? 0 : next.seat2?.cid === id ? 1 : -1;
+          const before = gsLiveRef.current;
+          if (next.phase !== 'playing') {
+            relay.sendTo(id, { type: 'ack', opId, ok: false, rev: currentRev(), reason: 'phase', message: '对局还没开始' } satisfies NetAck);
+            return;
+          }
+          if (seatIdx < 0 || !canGuestAct(before, m.action ?? '', seatIdx as PlayerIndex)) {
+            // 画面过期（提示可能已经变了）→ 让客机对齐后重试，而不是静默失败
+            pushPktLog(`✗ 拒绝操作 ${m.action}（画面过期或无权）`);
+            relay.sendTo(id, {
+              type: 'ack',
+              opId,
+              ok: false,
+              rev: currentRev(),
+              reason: 'stale',
+              message: '你的画面已过期，已自动对齐，请重新操作',
+            } satisfies NetAck);
+            sendStateTo(id, before);
+            return;
+          }
+          const after = applyAction(before, m.action ?? '', m.args ?? []);
+          commitGs(after);
+          // 回执等状态广播时一起发（这样 rev 里包含这次改动）
+          pendingAcksRef.current.push({ opId, ok: true });
           return;
         } else if (m.type === 'undoRequest') {
           // 客机请求悔棋 → 房主弹确认（同意后恢复房主历史栈并广播）
@@ -665,14 +783,14 @@ export default function Battlefield({
           }
           return;
         } else if (m.type === 'action' && next.phase === 'playing') {
-          // 对局中：只接受上桌玩家的操作（座位1=玩家0，座位2=玩家1）
+          // 兼容旧客户端：不带确认的操作（新客机走上面的 'op'）
           const seatIdx = next.seat1?.cid === id ? 0 : next.seat2?.cid === id ? 1 : -1;
-          setGs((g) => {
-            if (seatIdx < 0 || !canGuestAct(g, m.action ?? '', seatIdx as PlayerIndex)) {
-              return pushLog(g, `对方操作被拒绝（${m.action}）。`);
-            }
-            return applyAction(g, m.action ?? '', m.args ?? []);
-          });
+          const before = gsLiveRef.current;
+          if (seatIdx < 0 || !canGuestAct(before, m.action ?? '', seatIdx as PlayerIndex)) {
+            commitGs(pushLog(before, `对方操作被拒绝（${m.action}）。`));
+            return;
+          }
+          commitGs(applyAction(before, m.action ?? '', m.args ?? []));
           return;
         }
         commitRoom(next);
@@ -733,14 +851,14 @@ export default function Battlefield({
     gs0.players[0].name = room.seat1?.name ?? '玩家1';
     gs0.players[1].name = room.seat2?.name ?? '玩家2';
     const gs1 = rules.markReady(gs0); // 双方已在大厅准备 → 直接石头剪刀布
-    setGs(gs1);
+    commitGs(gs1); // 同步写入即时副本，房主接下来的操作/发包都基于这份
     const next = roomStartGame(room);
     roomRef.current = next;
     setRoom(next);
     setNetStatus('双方已准备，对局开始！');
     try {
       relay.broadcast({ type: 'room', room: next } satisfies NetRoomState);
-      sendStateAll(gs1, true); // 开局发整份（各方建立基线）
+      sendStateAll(gs1, { full: true }); // 开局发整份（各方建立基线）
     } catch {
       /* 忽略 */
     }
@@ -817,10 +935,44 @@ export default function Battlefield({
   /* ===== 客机/观战者：接收房主经中继发来的消息 ===== */
   useEffect(() => {
     if (mode !== 'guest' && mode !== 'spectator') return;
+    /** 应用完状态后回报"我到第几版 + 我的校验码"（房主据此显示对方是否同步） */
+    const reportRev = (gsNow: GameState, force = false) => {
+      const now = Date.now();
+      if (!force && now - guestRevReportAtRef.current < 900) return;
+      guestRevReportAtRef.current = now;
+      relay.sendTo(HOST_CID, { type: 'rev', rev: currentDecodeRev(), hash: stateHash(gsNow) } satisfies NetRevReport);
+    };
+    /** 校验码对不上：先自动要整份；如果是整份之后仍不一致 → 报分车让人看得到 */
+    const onHashMismatch = (gsNow: GameState, pktKind: string, pktHash: number) => {
+      const localHash = stateHash(gsNow);
+      const now = Date.now();
+      setDiag((d) => ({ ...d, ok: false, hash: hashHex(localHash), empty: d.empty + 1, warn: '校验不一致，正在自动对齐…' }));
+      pushPktLog(`⚠ 校验不一致（本地 ${hashHex(localHash)} vs 房主 ${hashHex(pktHash)}）`);
+      if (pktKind === 'full') {
+        // 整份都对不上 → 真·分车：把逐槽位校验值发给房主定位差异字段
+        relay.sendTo(HOST_CID, {
+          type: 'desync',
+          rev: currentDecodeRev(),
+          hash: localHash,
+          slots: stateSlotHashes(gsNow),
+        } satisfies NetDesync);
+      }
+      if (now - hashMismatchAtRef.current > 1200) {
+        hashMismatchAtRef.current = now;
+        relay.sendTo(HOST_CID, { type: 'resync' });
+      }
+    };
     const off = relay.onMessage((from, msg) => {
       if (from !== HOST_CID) return; // 只接受房主的消息
       try {
-        const m = JSON.parse(msg) as NetState | NetRoomState | { type: 'undoRequest' } | { type: 'undoReply'; ok: boolean };
+        const m = JSON.parse(msg) as
+          | NetState
+          | NetRoomState
+          | NetHash
+          | NetAck
+          | NetDesyncReport
+          | { type: 'undoRequest' }
+          | { type: 'undoReply'; ok: boolean };
         if (m.type === 'room') {
           setRoom(m.room);
           setMode(seatOf(m.room, myCidRef.current ?? -2) ? 'guest' : 'spectator');
@@ -829,21 +981,61 @@ export default function Battlefield({
         } else if (m.type === 'undoReply') {
           setUndoWait(false);
           setUndoMsg(m.ok ? '房主同意悔棋，已恢复上一步。' : '房主拒绝了悔棋请求。');
+        } else if (m.type === 'ack') {
+          // 房主回执：ok=false 且 reason=stale 表示"你画面旧了"→ 已自动对齐，请重新操作
+          const pend = pendingOpsRef.current.get(m.opId);
+          if (pend) {
+            pendingOpsRef.current.delete(m.opId);
+            setDiag((d) => ({ ...d, pending: pendingOpsRef.current.size, rev: m.rev }));
+            setPendingLabel(pendingOpsRef.current.size > 0 ? [...pendingOpsRef.current.values()][0].label : '');
+            if (!m.ok) {
+              setAlignMsg(m.reason === 'stale' ? '⚠ 你的画面已过期，已自动对齐，请重新操作' : `⚠ 操作未生效：${m.message ?? m.reason ?? '未知原因'}`);
+              pushPktLog(`← 回执失败 ${m.opId} reason=${m.reason ?? ''}`);
+            } else {
+              pushPktLog(`← 回执成功 ${m.opId} rev=${m.rev}`);
+            }
+          }
+        } else if (m.type === 'desync') {
+          // 房主定位出的分歧字段
+          const paths = (m as NetDesyncReport).paths ?? [];
+          setDiag((d) => ({
+            ...d,
+            ok: false,
+            paths,
+            warn: `⚠ 不同步（分车）：分歧字段 ${paths.slice(0, 5).join('、') || '(字段集合不同)'}`,
+          }));
+          pushPktLog(`⚠ 分车：${paths.slice(0, 5).join('、')}`);
+        } else if (m.type === 'hash') {
+          // 房主定期校验：只带版本号 + 校验码（约 100B）
+          const gsNow = guestGsRef.current ?? gsRef.current;
+          const mine = stateHash(gsNow);
+          const ok = hashHex(mine) === hashHex(m.hash);
+          setDiag((d) => ({ ...d, ok, hash: hashHex(mine) }));
+          if (!ok) onHashMismatch(gsNow, 'hash', m.hash);
         } else if (m.type === 'state') {
           // 增量同步：本地基线对不上（漏包/刚进房）→ 请房主补发整份
           const base = guestGsRef.current ?? gsRef.current;
           const res = decodeState(base, m.pkt, cards);
           if (res.needResync) {
             const now = Date.now();
-            if (now - lastResyncRef.current > 1500) {
+            if (now - lastResyncRef.current > 1200) {
               lastResyncRef.current = now;
               relay.sendTo(HOST_CID, { type: 'resync' });
             }
             setNetStatus('正在同步对局状态…');
           } else if (res.gs) {
             guestGsRef.current = res.gs;
+            gsLiveRef.current = res.gs;
             setGs(res.gs);
-            setNetStatus(`已同步对局状态（${m.pkt.kind === 'full' ? '整份' : '增量'} ${packetSize(m.pkt)}B）`);
+            pushPktLog(`← 状态 ${m.pkt.kind} rev=${m.pkt.rev} seq=${m.pkt.seq} ${packetSize(m.pkt)}B ${hashHex(m.pkt.hash)}`);
+            setDiag((d) => ({ ...d, rev: m.pkt.rev, hash: hashHex(res.localHash), ok: res.hashOk, paths: [] }));
+            if (res.hashOk) {
+              setNetStatus(`已同步对局状态（${m.pkt.kind === 'full' ? '整份' : '增量'} ${packetSize(m.pkt)}B · 校验 ✓）`);
+              setDiag((d) => (d.warn && d.warn.startsWith('⚠ 不同步') ? { ...d, warn: '' } : d));
+            } else {
+              onHashMismatch(res.gs, m.pkt.kind, m.pkt.hash);
+            }
+            reportRev(res.gs);
           }
         }
       } catch {
@@ -872,6 +1064,65 @@ export default function Battlefield({
     else if (initialMode === 'local') setGs((g) => { const n = rules.markReady(g); n.players[0].song = deckSongRef.current || undefined; return n; });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  /* ===== 定期校验（房主 → 全体：只发版本号+校验码，约 100 字节） =====
+     用极小成本发现"分车"：客机收到后自己算一遍，对不上就自动要整份重对齐。 */
+  useEffect(() => {
+    if (mode !== 'host' || room?.phase !== 'playing') return;
+    const t = setInterval(() => {
+      try {
+        relay.broadcast({
+          type: 'hash',
+          rev: currentRev(),
+          hash: stateHash(gsLiveRef.current),
+          seq: currentSeq(),
+        } satisfies NetHash);
+      } catch {
+        /* 忽略 */
+      }
+    }, 5000);
+    return () => clearInterval(t);
+  }, [mode, room?.phase]);
+
+  /* ===== 延迟探测（本机 ↔ 中继服务器，每 3 秒一次） ===== */
+  useEffect(() => {
+    if (mode === 'local') return;
+    let dead = false;
+    const tick = async () => {
+      const ms = await relay.pingServer();
+      if (!dead) setDiag((d) => ({ ...d, rtt: ms }));
+    };
+    void tick();
+    const t = setInterval(() => void tick(), 3000);
+    return () => {
+      dead = true;
+      clearInterval(t);
+    };
+  }, [mode]);
+
+  /* ===== 客机：操作超时重发（同一个 opId，房主会去重，不会执行两次） ===== */
+  useEffect(() => {
+    if (mode !== 'guest' && mode !== 'spectator') return;
+    const t = setInterval(() => {
+      const now = Date.now();
+      for (const [opId, info] of pendingOpsRef.current) {
+        if (now - info.at > 8000 && !info.resent) {
+          info.resent = true;
+          info.at = now;
+          relay.sendTo(HOST_CID, { type: 'op', opId, action: '', args: [], rev: currentDecodeRev() } satisfies NetOp);
+          setAlignMsg('⏳ 房主回执超时，已自动重发一次…');
+        }
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [mode]);
+
+  /* ===== 提示自动消失 ===== */
+  useEffect(() => {
+    if (!alignMsg) return;
+    const t = setTimeout(() => setAlignMsg(null), 6000);
+    return () => clearTimeout(t);
+  }, [alignMsg]);
 
   const onLeaveRoom = () => {
     try {
@@ -1386,7 +1637,51 @@ export default function Battlefield({
           </span>
         )}
         {isSpectatorView && <span className="net-player spectator">👁 观战中</span>}
+        {/* 同步诊断条：延迟 / 版本 / 校验码 / 待确认 / 对方是否已同步 */}
+        {isNet && (
+          <span className={`sync-diag${diag.ok && diag.peerOk ? '' : ' bad'}`} onClick={() => setDiagOpen((v) => !v)} title="点击查看同步明细">
+            {diag.rtt >= 0 ? `延迟 ${diag.rtt}ms` : '延迟 —'}
+            {' · '}版本 {mode === 'host' ? currentRev() : currentDecodeRev()}
+            {' · '}
+            {diag.ok ? `校验 ✓ ${diag.hash || '—'}` : `校验 ✗ ${diag.hash || '—'}`}
+            {diag.pending > 0 ? ` · 待确认 ${diag.pending}` : ''}
+            {mode === 'host'
+              ? guestRevRef.current.rev >= 0
+                ? ` · 对方${diag.peerOk ? '已同步 ✓' : `不同步 ✗（第 ${guestRevRef.current.rev} 版）`}`
+                : ' · 等待对方进房'
+              : ''}
+            {' '}
+            {diagOpen ? '▾' : '▸'}
+          </span>
+        )}
       </div>
+      {diagOpen && isNet && (
+        <div className="sync-diag-panel">
+          <div className="sync-diag-row">
+            <b>同步明细</b>
+            <span>我 {mode === 'host' ? '房主' : '客机'}：版本 {mode === 'host' ? currentRev() : currentDecodeRev()} · 校验 {diag.hash || '—'}</span>
+            {mode === 'host' && <span>对方：版本 {guestRevRef.current.rev >= 0 ? guestRevRef.current.rev : '—'} · 校验 {guestRevRef.current.hash ? hashHex(guestRevRef.current.hash) : '—'}</span>}
+            <span>往返延迟 {diag.rtt >= 0 ? `${diag.rtt}ms` : '—'}</span>
+            <span>校验不一致累计 {diag.empty} 次</span>
+            <span>{lastPktRef.current}</span>
+          </div>
+          {diag.warn && <div className="sync-diag-warn">{diag.warn}</div>}
+          <div className="sync-diag-log">
+            {pktLogRef.current.length === 0 && <div>（暂无记录）</div>}
+            {pktLogRef.current.map((l, i) => (
+              <div key={i}>{l}</div>
+            ))}
+          </div>
+        </div>
+      )}
+      {alignMsg && (
+        <div className="sync-align-msg" onClick={() => setAlignMsg(null)}>
+          {alignMsg} <span className="sync-align-close">（点击关闭）</span>
+        </div>
+      )}
+      {pendingLabel && (mode === 'guest' || mode === 'spectator') && (
+        <div className="sync-pending">⏳ 等待房主确认：{pendingLabel}</div>
+      )}
 
       <div className="battle-hint">
         {isSpectatorView

@@ -47,7 +47,70 @@ export interface NetResync {
   type: 'resync';
 }
 
-export type NetMessage = NetAction | NetState | NetResync | NetRoomClientMsg | NetWelcome | NetRoomState;
+/** 房主 → 客机：定期校验包（只带版本号+校验码，约 100 字节；对不上就要整份） */
+export interface NetHash {
+  type: 'hash';
+  rev: number;
+  hash: number;
+  seq: number;
+}
+
+/** 客机 → 房主：带确认的操作（opId 用于去重、rev = 我基于哪一版点的） */
+export interface NetOp {
+  type: 'op';
+  opId: string;
+  action: string;
+  args: unknown[];
+  rev: number;
+}
+
+/** 房主 → 客机：操作回执（ok=false 时 reason 说明原因，如 stale=你的画面旧了） */
+export interface NetAck {
+  type: 'ack';
+  opId: string;
+  ok: boolean;
+  rev: number;
+  reason?: string;
+  message?: string;
+}
+
+/** 客机 → 房主：我已同步到第 rev 版（房主据此显示"对方同步中/已同步"） */
+export interface NetRevReport {
+  type: 'rev';
+  rev: number;
+  hash: number;
+}
+
+/** 客机 → 房主：校验码对不上，附带逐槽位校验值供房主定位 */
+export interface NetDesync {
+  type: 'desync';
+  rev: number;
+  hash: number;
+  slots: [string, number][];
+}
+
+/** 房主 → 全体：分车报告（哪些字段不一致） */
+export interface NetDesyncReport {
+  type: 'desync';
+  ok: boolean;
+  hostHash: number;
+  guestHash: number;
+  paths: string[];
+}
+
+export type NetMessage =
+  | NetAction
+  | NetState
+  | NetHash
+  | NetResync
+  | NetOp
+  | NetAck
+  | NetRevReport
+  | NetDesync
+  | NetDesyncReport
+  | NetRoomClientMsg
+  | NetWelcome
+  | NetRoomState;
 
 /** 动作处理器：根据动作名与参数应用规则（房主使用） */
 export function applyAction(gs: GameState, action: string, args: unknown[]): GameState {

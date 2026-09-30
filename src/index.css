@@ -2023,6 +2023,55 @@ body {
   font-size: 12px;
   outline: none;
 }
+
+/* ===== 同步诊断条 / 操作确认提示 ===== */
+.sync-diag {
+  margin-left: 10px;
+  font-size: 12px;
+  color: #8ad0a0;
+  background: #16241f;
+  border: 1px solid #2f5a45;
+  border-radius: 14px;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.sync-diag:hover { border-color: #7ad0a0; }
+.sync-diag.bad { color: #ff9d9d; background: #2a1a1a; border-color: #7a3b3b; }
+.sync-diag-panel {
+  margin: 6px 12px 0;
+  background: #101a2b;
+  border: 1px solid #33445e;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #b7c6dc;
+}
+.sync-diag-row { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+.sync-diag-row b { color: #fff; }
+.sync-diag-warn { margin-top: 8px; color: #ff9d9d; font-weight: 700; }
+.sync-diag-log { margin-top: 8px; font-family: Consolas, monospace; font-size: 11px; color: #8fa3bf; line-height: 1.6; }
+.sync-align-msg {
+  margin: 6px 12px 0;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #3a2f1a;
+  border: 1px solid #b48a3b;
+  color: #ffd97a;
+  font-size: 13px;
+  cursor: pointer;
+}
+.sync-align-close { color: #b7a06a; font-size: 11px; }
+.sync-pending {
+  margin: 6px 12px 0;
+  padding: 6px 12px;
+  border-radius: 8px;
+  background: #1b2730;
+  border: 1px solid #3b7a8a;
+  color: #8fe3f0;
+  font-size: 13px;
+  display: inline-block;
+}
 .deck-chip .deck-song-chip { color: #ffd75e; margin-left: 2px; }
 .song-playing-btn {
   border-color: #b48a3b !important;

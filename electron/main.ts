@@ -342,6 +342,7 @@ function createWindow(): BrowserWindow {
                 window.__frames.push('patch failed: ' + String(e));
               }
               // 0. 先在「卡组制作」造一副 60 张的卡组并绑定语音包（验证语音下拉 + 卡组绑定）
+              await waitFor('.menu-btn', 20000); // 等卡牌数据加载完、主菜单出现
               const deckBtn = byText(qa('.menu-btn'), '卡组制作');
               if (deckBtn) click(deckBtn);
               out.deckBuilder = await waitFor('.deck-builder', 8000);
@@ -443,6 +444,7 @@ function createWindow(): BrowserWindow {
                     c.log.push(stamp() + ' ' + inner.type + (inner.type === 'room' ? '(' + (inner.room?.spectators ?? []).map((s) => s.name).join(',') + ')' : ''));
                     if (inner.type === 'room') { c.roomState = inner.room; c.roomCount++; }
                     if (inner.type === 'state') c.gotState = true;
+                    if (inner.type === 'ack') { (c.acks = c.acks || []).push(inner); }
                   } else {
                     c.types.push('srv:' + m.t);
                     c.log.push(stamp() + ' srv:' + m.t);
@@ -481,9 +483,17 @@ function createWindow(): BrowserWindow {
               out.hostTurnInfo = q('.turn-info')?.textContent ?? '';
               out.hostSideLabels = qa('.side-player-label').map((e) => e.textContent.trim()).join(' | ');
               out.hostNetPlayer = q('.net-player')?.textContent ?? '';
-              // 7. 走完开局流程（石头剪刀布 → 确认 → 双方起手换牌）→ 点「开始回合」→ 检查语音
+              // 7. 走完开局流程（石头剪刀布 → 确认 → 双方起手换牌）→ 点「开始回合」→ 检查语音 + 操作回执
               const clientAction = (action, args) =>
                 a.send(JSON.stringify({ t: 'relay', to: -1, msg: JSON.stringify({ type: 'action', action, args }) }));
+              // 新协议：带确认的操作（opId + rev），房主应回 ack
+              let opSeq = 0;
+              const clientOp = (action, args) => {
+                opSeq++;
+                const opId = 'e2e-' + opSeq;
+                a.send(JSON.stringify({ t: 'relay', to: -1, msg: JSON.stringify({ type: 'op', opId, action, args, rev: 0 }) }));
+                return opId;
+              };
               let voicePlayedText = '';
               for (let step = 0; step < 40 && !voicePlayedText; step++) {
                 await sleep(400);
@@ -500,7 +510,7 @@ function createWindow(): BrowserWindow {
                 if (findBtn('石头') && !out.rpsSent) {
                   out.rpsSent = true;
                   click(findBtn('石头'));
-                  clientAction('chooseRps', [1, 'scissors']);
+                  out.opIdSent = clientOp('chooseRps', [1, 'scissors']);
                   continue;
                 }
                 if (findBtn('开始起手换牌')) {
@@ -522,6 +532,9 @@ function createWindow(): BrowserWindow {
               }
               out.voicePlayed = voicePlayedText;
               out.hostTurnAfterBegin = q('.turn-info')?.textContent ?? '';
+              // 操作回执 + 同步诊断条
+              out.ackList = (a.acks || []).map((k) => k.opId + ':' + (k.ok ? 'ok' : 'fail') + (k.reason ? '/' + k.reason : ''));
+              out.diagText = q('.sync-diag')?.textContent ?? '';
               out.bPhase = b.roomState?.phase;
               out.bSpectatorDuringPlay = !!b.roomState && b.roomState.phase === 'playing' && (b.roomState.spectators ?? []).some((s) => s.name === '小红');
               out.bGotState = await waitUntil(() => b.gotState, 10000);

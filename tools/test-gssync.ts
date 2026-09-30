@@ -9,7 +9,7 @@ import type { Card } from '../src/core/cards';
 import { createEmptyGame, newInstance, pushLog, PlayerIndex } from '../src/core/game';
 import * as rules from '../src/core/rules';
 import { startGame } from '../src/core/sampleDeck';
-import { resetEncode, resetDecode, encodeState, decodeState, packetSize, fullSize, slotsOf } from '../src/net/gsSync';
+import { resetEncode, resetDecode, encodeState, decodeState, packetSize, fullSize, slotsOf, stateHash, stateSlotHashes, divergentSlots, hashHex, canon } from '../src/net/gsSync';
 
 const cards: Card[] = JSON.parse(readFileSync('data/cards/range.json', 'utf-8'));
 const byId = new Map(cards.map((c) => [c.id, c]));
@@ -62,9 +62,8 @@ const step = (label: string, next: typeof gs) => {
     return;
   }
   guest = res.gs;
-  const a = JSON.stringify(gs);
-  const b = JSON.stringify(guest);
-  if (a !== b) {
+  // 用规范化比较（对象键顺序可能不同，语义相同即算一致）
+  if (canon(gs) !== canon(guest)) {
     mismatch++;
     if (!firstMismatch) firstMismatch = `${label}: 状态不一致`;
   }
@@ -164,6 +163,63 @@ check('客机本地补齐了卡牌资料', !!anyCard && anyCard.id === 'LO-6845'
 const slots = slotsOf(g2);
 check('槽位不含 cardsById', !slots.some(([p]) => p === 'cardsById'));
 check('槽位覆盖每个玩家的每个字段', slots.some(([p]) => p === 'players.0.hand') && slots.some(([p]) => p === 'players.1.deck'));
+
+console.log('\n⑤ 校验码（分车检测）');
+{
+  resetEncode();
+  resetDecode();
+  let g = startGame(cards, deckA, deckB);
+  const pkt = encodeState(g, { full: true });
+  const res = decodeState(null, pkt, cards);
+  check('包内带校验码', typeof pkt.hash === 'number' && pkt.hash > 0, String(pkt.hash));
+  check('包内带发包序号 seq', typeof pkt.seq === 'number' && pkt.seq > 0, String(pkt.seq));
+  check('客机应用后校验码一致（hashOk）', res.hashOk, `${hashHex(res.localHash)} vs ${hashHex(pkt.hash)}`);
+
+  // 客机状态被外力改动（模拟"分车"）→ 校验码必须不一致
+  const broken = { ...res.gs!, players: [{ ...res.gs!.players[0], deck: [] }, res.gs!.players[1]] } as NonNullable<typeof res.gs>;
+  check('状态被改动 → 校验码不一致', stateHash(broken) !== pkt.hash, `${hashHex(stateHash(broken))}`);
+
+  // 逐槽位比对能指出是哪个字段不同
+  const paths = divergentSlots(stateSlotHashes(g), stateSlotHashes(broken));
+  check('能定位到分歧字段（players.0.deck）', paths.includes('players.0.deck'), JSON.stringify(paths));
+
+  // 键顺序不同但内容相同 → 校验码必须相同（避免误报分车）
+  const reordered = { ...g, players: [Object.assign({}, ...Object.keys(g.players[0]).reverse().map((k) => ({ [k]: (g.players[0] as unknown as Record<string, unknown>)[k] }))), g.players[1]] } as typeof g;
+  check('对象键顺序不同但内容相同 → 校验码相同（不误报）', stateHash(reordered) === pkt.hash, `${hashHex(stateHash(reordered))} vs ${hashHex(pkt.hash)}`);
+  check('规范化函数对键顺序不敏感', canon({ a: 1, b: 2 }) === canon({ b: 2, a: 1 }));
+}
+
+console.log('\n⑥ 给新观战者补发整份，不影响全体的增量基准（曾经的真 bug）');
+{
+  resetEncode();
+  let g = startGame(cards, deckA, deckB);
+  const p0 = encodeState(g, { full: true }); // 发给全体：建立基准（版本 0）
+  const r0 = decodeState(null, p0, cards);
+  g = pushLog(g, '变化1');
+  const pa = encodeState(g); // 增量（版本 0 → 1）
+  const r1 = decodeState(r0.gs, pa, cards);
+  check('增量包正常（基准 0 → 1）', pa.kind === 'patch' && pa.base === 0 && r1.hashOk, `kind=${pa.kind} base=${pa.base} hashOk=${r1.hashOk}`);
+  // 中途来了一位观战者：给它单独补发整份（perRecipient，不能动全体的基准）
+  g = pushLog(g, '变化2');
+  const pFull = encodeState(g, { full: true, perRecipient: true });
+  check('perRecipient 整份包带当前状态', !!pFull.gs && pFull.kind === 'full');
+  g = pushLog(g, '变化3');
+  const pb = encodeState(g); // 之后的增量必须仍以「变化1」为基准（含变化2+变化3）
+  const r2 = decodeState(r1.gs, pb, cards);
+  check(
+    '补发整份后，全体增量仍能正确应用（没被污染）',
+    !r2.needResync && !!r2.gs && canon(r2.gs) === canon(g),
+    r2.needResync ? 'needResync' : '状态不一致',
+  );
+}
+
+console.log('\n⑦ 心跳校验包很小（定期发现分车用）');
+{
+  resetEncode();
+  const g = startGame(cards, deckA, deckB);
+  const full = JSON.stringify({ type: 'hash', rev: 0, hash: stateHash(g), seq: 1 });
+  check(`心跳包只有 ${full.length} 字节（整份是 ${fullSize(g)} 字节）`, full.length < 200, String(full.length));
+}
 
 console.log(`\n结果：${pass} 通过，${fail} 失败\n`);
 process.exit(fail === 0 ? 0 : 1);

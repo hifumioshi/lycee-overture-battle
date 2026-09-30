@@ -142,6 +142,37 @@ export function listRooms(): Promise<RelayRoom[]> {
   });
 }
 
+/**
+ * 测「本机 ↔ 中继服务器」的往返延迟（毫秒）。用现成的 list 请求做探针，
+ * 所以**不需要改服务器代码**。返回 -1 表示当前连不上。
+ */
+export function pingServer(): Promise<number> {
+  return new Promise((resolve) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      resolve(-1);
+      return;
+    }
+    const t0 = performance.now();
+    const handler = (e: MessageEvent) => {
+      try {
+        const m = JSON.parse(String(e.data)) as Msg;
+        if (m.t === 'rooms') {
+          ws?.removeEventListener('message', handler);
+          resolve(Math.round(performance.now() - t0));
+        }
+      } catch {
+        /* 忽略 */
+      }
+    };
+    ws.addEventListener('message', handler);
+    raw({ t: 'list' });
+    setTimeout(() => {
+      ws?.removeEventListener('message', handler);
+      resolve(-1);
+    }, 3000);
+  });
+}
+
 function waitJoined(): Promise<{ roomId: string; cid: number; isHost: boolean; name: string }> {
   return new Promise((resolve, reject) => {
     if (!ws) {
