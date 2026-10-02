@@ -1869,7 +1869,46 @@ body {
   gap: 30px;
   padding: 40px 20px;
   background: radial-gradient(ellipse at 50% 30%, #1c2a42 0%, #141c28 70%);
+  position: relative;
 }
+/* 左下角：版本号 + 在线更新 */
+.ver-badge {
+  position: absolute;
+  left: 16px;
+  bottom: 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  max-width: calc(100% - 32px);
+  font-size: 12px;
+  color: #8fa3bf;
+}
+.ver-num {
+  font-family: Consolas, monospace;
+  color: #b7c6dc;
+  background: #182236;
+  border: 1px solid #2a3a52;
+  border-radius: 12px;
+  padding: 3px 10px;
+}
+.ver-text { color: #8fa3bf; }
+.ver-badge.state-ready .ver-text { color: #7ad0a0; font-weight: 700; }
+.ver-badge.state-error .ver-text { color: #ff9d9d; }
+.ver-badge.state-available .ver-text,
+.ver-badge.state-downloading .ver-text { color: #ffd75e; }
+.ver-btn {
+  background: #1d2a3d;
+  border: 1px solid #33445e;
+  border-radius: 8px;
+  color: #d5e0ef;
+  font-size: 12px;
+  padding: 3px 10px;
+  cursor: pointer;
+}
+.ver-btn:hover { border-color: #7ad0a0; color: #fff; }
+.ver-btn.primary { background: #3d6fb4; border-color: #3d6fb4; color: #fff; }
+.ver-btn.primary:hover { background: #4a80c9; }
 .menu-title { text-align: center; }
 .menu-title h1 {
   font-size: 40px;

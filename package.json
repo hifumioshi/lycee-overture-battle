@@ -1,6 +1,6 @@
 {
   "name": "lycee-overture-battle",
-  "version": "0.19.0",
+  "version": "0.20.0",
   "description": "Lycee Overture 网络对战平台（Win10 桌面版）",
   "private": true,
   "main": "dist-electron/main.js",
@@ -10,7 +10,8 @@
     "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "build": "node -e \"require('fs').rmSync('dist-electron',{recursive:true,force:true})\" && tsc -p tsconfig.electron.json && vite build",
     "start": "electron .",
-    "dist": "electron-builder --win portable"
+    "dist": "electron-builder --win nsis portable --publish never",
+    "dist:publish": "electron-builder --win nsis --publish always"
   },
   "author": "lycee-fan",
   "license": "MIT",
@@ -26,11 +27,33 @@
     "directories": {
       "output": "release"
     },
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "hifumioshi",
+        "repo": "lycee-overture-battle",
+        "releaseType": "release"
+      }
+    ],
     "win": {
       "target": [
+        "nsis",
         "portable"
       ],
-      "artifactName": "LyceeOverture-${version}-Portable.exe"
+      "artifactName": "LyceeOverture-${version}-${ext}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Lycee Overture 对战平台",
+      "artifactName": "LyceeOverture-${version}-Setup.${ext}",
+      "deleteAppDataOnUninstall": false
+    },
+    "portable": {
+      "artifactName": "LyceeOverture-${version}-Portable.${ext}"
     }
   },
   "devDependencies": {
@@ -48,6 +71,7 @@
     "wait-on": "^9.1.0"
   },
   "dependencies": {
+    "electron-updater": "^6.8.9",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "ws": "^8.21.3"

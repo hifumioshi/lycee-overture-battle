@@ -1,3 +1,5 @@
+import VersionBadge from './VersionBadge';
+
 export default function MainMenu({
   onMultiplayer,
   onDeckBuilder,
@@ -30,6 +32,8 @@ export default function MainMenu({
           <span className="menu-desc">浏览与查看卡牌</span>
         </button>
       </div>
+      {/* 左下角：版本号 + 在线更新 */}
+      <VersionBadge />
     </div>
   );
 }

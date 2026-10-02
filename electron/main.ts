@@ -1,8 +1,9 @@
-import { app, BrowserWindow, shell, ipcMain, protocol, net } from 'electron';
+import { app, BrowserWindow, shell, ipcMain, protocol, net, dialog } from 'electron';
 import * as fs from 'fs';
 import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
+import { autoUpdater } from 'electron-updater';
 
 // 战歌 / 语音 自定义协议（本地播放 mp3/wav/ogg/m4a）：
 //   song://local/<文件名>
@@ -66,18 +67,58 @@ function listVoices() {
   });
 }
 
-// 把应用数据目录（缓存/网络数据等）放到可写位置：
-// 开发时放项目内 data/user-data；打包后放 exe 旁边的 data/user-data（便携，且不在只读的 asar 内）。
-// 便携版（portable）运行时 process.execPath 是临时解压路径，用 PORTABLE_EXECUTABLE_DIR 定位原始 exe。
+// ===== 数据根目录（卡组存档 / 战歌 / 语音 / 中继配置）=====
+// 三种形态差别很大，尤其"安装版"必须把数据放到用户目录，
+// 否则 NSIS 升级/卸载时会把朋友的卡组、战歌、语音一起删掉。
+//   1) 便携版（portable）      → exe 旁边的 data/
+//   2) 安装版（NSIS 装出来的） → %APPDATA%/lycee-overture-battle/（升级、重装都不丢）
+//   3) 开发 / 解压即用文件夹     → exe 旁边的 data/（保持原有习惯）
+// 便携版运行时 process.execPath 是临时解压路径，用 PORTABLE_EXECUTABLE_DIR 定位原始 exe。
 const portableDir = process.env.PORTABLE_EXECUTABLE_DIR;
-app.setPath(
-  'userData',
-  portableDir
-    ? path.join(portableDir, 'data', 'user-data')
+/** 安装版用户数据目录（appData 下） */
+function installedDataRoot(): string {
+  return path.join(app.getPath('appData'), 'lycee-overture-battle');
+}
+/** 便携/解压形态的数据目录（exe 旁边） */
+function besideExeDataRoot(): string {
+  return portableDir
+    ? path.join(portableDir, 'data')
     : app.isPackaged
-      ? path.join(path.dirname(process.execPath), 'data', 'user-data')
-      : path.join(__dirname, '..', 'data', 'user-data'),
-);
+      ? path.join(path.dirname(process.execPath), 'data')
+      : path.join(__dirname, '..', 'data');
+}
+function isInstalledBuild(): boolean {
+  if (!app.isPackaged || portableDir) return false;
+  try {
+    // NSIS 安装版会在安装目录留一个卸载程序；用户目录已有数据也视为安装版（保持粘性）
+    const exeDir = path.dirname(process.execPath);
+    if (fs.existsSync(installedDataRoot())) return true;
+    return fs
+      .readdirSync(exeDir)
+      .some((f) => /^Uninstall .*\.exe$/i.test(f) || f === 'Uninstall.exe');
+  } catch {
+    return false;
+  }
+}
+function dataRoot(): string {
+  return isInstalledBuild() ? installedDataRoot() : besideExeDataRoot();
+}
+/** 首次以安装版运行时，把旧的"解压即用"数据搬过来（卡组/战歌/语音都不丢） */
+function migrateDataIfNeeded(): void {
+  try {
+    const target = installedDataRoot();
+    if (!isInstalledBuild()) return;
+    const legacy = besideExeDataRoot(); // 安装版的 exeDir 里通常没有旧数据，这里是保险
+    if (fs.existsSync(target) || !fs.existsSync(legacy)) return;
+    fs.mkdirSync(target, { recursive: true });
+    fs.cpSync(legacy, target, { recursive: true });
+    console.log(`[data] 已把旧数据迁移到 ${target}`);
+  } catch (e) {
+    console.warn('[data] 迁移失败：', e);
+  }
+}
+migrateDataIfNeeded();
+app.setPath('userData', path.join(dataRoot(), 'user-data'));
 
 // ===== 联机服务器（房主模式）：支持多客户端（玩家2 + 观战者） =====
 let wss: WebSocketServer | null = null;
@@ -343,6 +384,11 @@ function createWindow(): BrowserWindow {
               }
               // 0. 先在「卡组制作」造一副 60 张的卡组并绑定语音包（验证语音下拉 + 卡组绑定）
               await waitFor('.menu-btn', 20000); // 等卡牌数据加载完、主菜单出现
+              // 左下角版本号 + 在线更新状态
+              out.appVersion = q('.ver-num')?.textContent ?? '';
+              out.updateBadge = (q('.ver-badge')?.textContent ?? '').replace(/\s+/g, ' ').trim();
+              const updateStatus = await window.lyceeApp.updateStatus();
+              out.updateState = updateStatus?.state ?? '(无)';
               const deckBtn = byText(qa('.menu-btn'), '卡组制作');
               if (deckBtn) click(deckBtn);
               out.deckBuilder = await waitFor('.deck-builder', 8000);
@@ -634,10 +680,130 @@ void app.whenReady().then(() => {
   });
   const win = createWindow();
   setupNetIpc(win);
+  setupUpdater(win);
+  void offerLegacyImport(win);
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+/** 第一次以安装版启动时，提供"导入旧版 data 目录"的引导（卡组/战歌/语音不丢） */
+async function offerLegacyImport(win: BrowserWindow): Promise<void> {
+  if (!isInstalledBuild()) return;
+  if (process.env.SHOT_PATH || process.env.SHOT_ROOM || process.env.SHOT_TEST) return; // 自动化测试不打扰
+  const target = installedDataRoot();
+  if (fs.existsSync(path.join(target, 'user-data'))) return; // 之前已经导入/使用过
+  try {
+    const r = await dialog.showMessageBox(win, {
+      type: 'question',
+      buttons: ['选择旧版数据文件夹', '跳过（重新开始）'],
+      defaultId: 0,
+      cancelId: 1,
+      title: '导入旧版本数据',
+      message: '这是第一次以「安装版」启动。',
+      detail:
+        '如果你以前用的是解压版（zip），可以把旧文件夹里的 data 目录导入过来，' +
+        '卡组 / 战歌 / 语音素材都会保留。要现在导入吗？（导入后需要重启程序）',
+    });
+    if (r.response !== 0) return;
+    const picked = await dialog.showOpenDialog(win, { title: '选择旧版的 data 文件夹（或它上一级目录）', properties: ['openDirectory'] });
+    if (picked.canceled || !picked.filePaths[0]) return;
+    const src = picked.filePaths[0];
+    const dataSrc = fs.existsSync(path.join(src, 'user-data')) ? src : path.join(src, 'data');
+    if (!fs.existsSync(path.join(dataSrc, 'user-data'))) {
+      await dialog.showMessageBox(win, { message: '这个文件夹里没有 data/user-data，导入已取消。', buttons: ['好'] });
+      return;
+    }
+    fs.mkdirSync(target, { recursive: true });
+    fs.cpSync(dataSrc, target, { recursive: true });
+    await dialog.showMessageBox(win, { message: '导入完成！请关闭并重新打开程序。', buttons: ['好'] });
+  } catch (e) {
+    console.warn('[data] 导入旧数据失败：', e);
+  }
+}
+
+/* ================= 在线更新（类似网游：打开游戏自动检查 / 一键更新） =================
+   更新源：GitHub Releases（package.json 的 build.publish 里配置）。
+   只有"安装版（NSIS）"能自动更新；便携版/解压版会提示去下载安装包。 */
+type UpdateStatus =
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'latest'; version: string }
+  | { state: 'available'; version: string }
+  | { state: 'downloading'; percent: number; version: string }
+  | { state: 'ready'; version: string }
+  | { state: 'error'; message: string }
+  | { state: 'unsupported'; message: string };
+
+let lastUpdateStatus: UpdateStatus = { state: 'idle' };
+
+function setupUpdater(win: BrowserWindow): void {
+  const push = (s: UpdateStatus) => {
+    lastUpdateStatus = s;
+    try {
+      win.webContents.send('update:status', s);
+    } catch {
+      /* 忽略 */
+    }
+  };
+
+  ipcMain.handle('app:version', () => app.getVersion());
+  ipcMain.handle('app:update-status', () => lastUpdateStatus);
+  ipcMain.handle('app:check-update', async () => {
+    if (!app.isPackaged) {
+      push({ state: 'unsupported', message: '开发模式下不检查更新' });
+      return lastUpdateStatus;
+    }
+    if (!isInstalledBuild()) {
+      push({ state: 'unsupported', message: '当前是便携版/解压版，请下载安装版后即可自动更新' });
+      return lastUpdateStatus;
+    }
+    try {
+      push({ state: 'checking' });
+      await autoUpdater.checkForUpdates();
+    } catch (e) {
+      push({ state: 'error', message: e instanceof Error ? e.message : String(e) });
+    }
+    return lastUpdateStatus;
+  });
+  ipcMain.handle('app:install-update', () => {
+    try {
+      autoUpdater.quitAndInstall(false, true);
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  });
+  ipcMain.handle('app:open-releases', async () => {
+    try {
+      await shell.openExternal('https://github.com/hifumioshi/lycee-overture-battle/releases/latest');
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, message: e instanceof Error ? e.message : String(e) };
+    }
+  });
+
+  if (!app.isPackaged) return; // 开发模式不启用
+  autoUpdater.autoDownload = true; // 发现新版本就后台下载，下载完提示重启
+  autoUpdater.autoInstallOnAppQuit = true;
+  autoUpdater.on('checking-for-update', () => push({ state: 'checking' }));
+  autoUpdater.on('update-available', (info) => push({ state: 'available', version: String(info.version) }));
+  autoUpdater.on('update-not-available', (info) => push({ state: 'latest', version: String(info.version) }));
+  autoUpdater.on('download-progress', (p) =>
+    push({ state: 'downloading', percent: Math.round(p.percent), version: lastUpdateStatus.state === 'available' || lastUpdateStatus.state === 'downloading' ? lastUpdateStatus.version : '' }),
+  );
+  autoUpdater.on('update-downloaded', (info) => push({ state: 'ready', version: String(info.version) }));
+  autoUpdater.on('error', (e) => push({ state: 'error', message: e?.message ?? String(e) }));
+
+  // 启动后延迟几秒自动检查（不打扰开局）
+  if (isInstalledBuild()) {
+    setTimeout(() => {
+      void autoUpdater.checkForUpdates().catch((e) => push({ state: 'error', message: e?.message ?? String(e) }));
+    }, 5000);
+  } else {
+    push({ state: 'unsupported', message: '当前是便携版/解压版，安装版才能自动更新' });
+  }
+}
 
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();

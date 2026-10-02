@@ -1,5 +1,16 @@
-// 预加载脚本暴露的联机 API 类型声明
+// 预加载脚本暴露的 API 类型声明
 export {};
+
+/** 在线更新状态（与 electron/main.ts 的 UpdateStatus 对应） */
+export type UpdateStatus =
+  | { state: 'idle' }
+  | { state: 'checking' }
+  | { state: 'latest'; version: string }
+  | { state: 'available'; version: string }
+  | { state: 'downloading'; percent: number; version: string }
+  | { state: 'ready'; version: string }
+  | { state: 'error'; message: string }
+  | { state: 'unsupported'; message: string };
 
 declare global {
   interface Window {
@@ -24,6 +35,15 @@ declare global {
     /** 自建中继服务器地址（data/relay.txt）；返回空字符串表示用内置默认地址 */
     lyceeRelay: {
       url(): Promise<string>;
+    };
+    /** 版本号 + 在线更新（安装版可自动更新；便携版会提示下载安装版） */
+    lyceeApp: {
+      version(): Promise<string>;
+      updateStatus(): Promise<UpdateStatus>;
+      checkUpdate(): Promise<UpdateStatus>;
+      installUpdate(): Promise<{ ok: boolean; message?: string }>;
+      openReleases(): Promise<{ ok: boolean; message?: string }>;
+      onUpdateStatus(cb: (s: UpdateStatus) => void): () => void;
     };
   }
 }

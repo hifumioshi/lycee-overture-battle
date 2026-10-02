@@ -38,3 +38,13 @@ contextBridge.exposeInMainWorld('lyceeVoices', {
 contextBridge.exposeInMainWorld('lyceeRelay', {
   url: () => ipcRenderer.invoke('relay:url') as Promise<string>,
 });
+
+// 版本号 + 在线更新（安装版可自动更新；便携版会提示下载安装版）
+contextBridge.exposeInMainWorld('lyceeApp', {
+  version: () => ipcRenderer.invoke('app:version') as Promise<string>,
+  updateStatus: () => ipcRenderer.invoke('app:update-status') as Promise<unknown>,
+  checkUpdate: () => ipcRenderer.invoke('app:check-update') as Promise<unknown>,
+  installUpdate: () => ipcRenderer.invoke('app:install-update') as Promise<{ ok: boolean; message?: string }>,
+  openReleases: () => ipcRenderer.invoke('app:open-releases') as Promise<{ ok: boolean; message?: string }>,
+  onUpdateStatus: (cb: (s: unknown) => void) => subscribe('update:status', (s) => cb(s)),
+});
