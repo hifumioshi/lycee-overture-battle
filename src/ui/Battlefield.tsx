@@ -19,7 +19,7 @@ import { getParsed } from '../core/effectEngine';
 import { effectiveStats as engStats } from '../core/effectEngine';
 import { hasHandDeclare, hasDeclare, hasMoveAbility } from '../core/abilities';
 import * as rules from '../core/rules';
-import { applyAction, canGuestAct, promptOwner, NetAction, NetState, NetHash, NetAck, NetOp, NetRevReport, NetDesync, NetDesyncReport, NetRoomState, NetMode } from '../net/protocol';
+import { applyAction, canGuestAct, guestActDenied, promptOwner, NetAction, NetState, NetHash, NetAck, NetOp, NetRevReport, NetDesync, NetDesyncReport, NetRoomState, NetMode } from '../net/protocol';
 import * as relay from '../net/relay';
 import { foldersOf, pickVariant } from '../core/voice';
 import { encodeState, decodeState, resetEncode, resetDecode, packetSize, fullSize, stateHash, stateSlotHashes, hashHex, divergentSlots, currentRev, currentSeq, currentDecodeRev } from '../net/gsSync';
@@ -220,6 +220,7 @@ export default function Battlefield({
     empty: 0, // 校验不一致累计次数
   });
   const [diagOpen, setDiagOpen] = useState(false);
+  const [disconnected, setDisconnected] = useState(false); // 联机断开：冻结操作，避免误以为还能打
   const pktLogRef = useRef<string[]>([]);
   const pushPktLog = (line: string) => {
     pktLogRef.current = [`${new Date().toLocaleTimeString()} ${line}`, ...pktLogRef.current].slice(0, 10);
@@ -229,7 +230,6 @@ export default function Battlefield({
   const [pendingLabel, setPendingLabel] = useState<string>(''); // 等待房主确认的提示文字
   const guestRevReportAtRef = useRef(0);
   const doneOpIdsRef = useRef<string[]>([]); // 房主：处理过的 opId（去重，防连点/重发双执行）
-  const pendingAcksRef = useRef<{ opId: string; ok: boolean; reason?: string; message?: string }[]>([]);
   const guestRevRef = useRef<{ rev: number; hash: number }>({ rev: -1, hash: 0 });
   const hashMismatchAtRef = useRef(0);
   const [alignMsg, setAlignMsg] = useState<string | null>(null); // "已自动对齐"等提示
@@ -586,6 +586,10 @@ export default function Battlefield({
      上桌客机：发给房主**并等待回执**（带 opId 去重 + 我看到的状态版本），期间按钮显示「等待房主…」
      观战者：不可操作 */
   const doAction = (action: string, ...args: unknown[]) => {
+    if (disconnected) {
+      setAlignMsg('⚠ 已与服务器断开，操作不会生效。请返回主菜单重新进入房间。');
+      return;
+    }
     if (mode === 'guest') {
       sendOp(action, args);
       return;
@@ -618,14 +622,6 @@ export default function Battlefield({
     lastPktRef.current = `${pkt.kind} rev=${pkt.rev} ${packetSize(pkt)}B（整份 ${fullSize(g)}B）`;
     pushPktLog(`→ 状态 ${pkt.kind} rev=${pkt.rev} seq=${pkt.seq} ${packetSize(pkt)}B ${hashHex(pkt.hash)}`);
     setDiag((d) => ({ ...d, rev: pkt.rev, hash: hashHex(pkt.hash), ok: true }));
-    // 状态发出去之后，把「等待回执」的操作一次性确认掉（带上真正包含这次改动的版本号）
-    const acks = pendingAcksRef.current;
-    if (acks.length > 0) {
-      pendingAcksRef.current = [];
-      for (const a of acks) {
-        relay.broadcast({ type: 'ack', opId: a.opId, ok: a.ok, rev: pkt.rev, reason: a.reason, message: a.message } satisfies NetAck);
-      }
-    }
   };
   /** 房主 → 单个客户端：整份（新加入者/请求重同步）。perRecipient 不影响全体的增量基准 */
   const sendStateTo = (cid: number, g: GameState) => {
@@ -750,24 +746,43 @@ export default function Battlefield({
             relay.sendTo(id, { type: 'ack', opId, ok: false, rev: currentRev(), reason: 'phase', message: '对局还没开始' } satisfies NetAck);
             return;
           }
-          if (seatIdx < 0 || !canGuestAct(before, m.action ?? '', seatIdx as PlayerIndex)) {
-            // 画面过期（提示可能已经变了）→ 让客机对齐后重试，而不是静默失败
-            pushPktLog(`✗ 拒绝操作 ${m.action}（画面过期或无权）`);
+          if (seatIdx < 0) {
+            relay.sendTo(id, { type: 'ack', opId, ok: false, rev: currentRev(), reason: 'forbidden', message: '你不在对局座位上' } satisfies NetAck);
+            return;
+          }
+          // 权威校验：① 时点是否属于他 ② 参数里的卡是不是他的（防越权操作对手的卡）
+          const denied = guestActDenied(before, m.action ?? '', m.args ?? [], seatIdx as PlayerIndex);
+          if (denied) {
+            pushPktLog(`✗ 拒绝操作 ${m.action}：${denied}`);
             relay.sendTo(id, {
               type: 'ack',
               opId,
               ok: false,
               rev: currentRev(),
-              reason: 'stale',
-              message: '你的画面已过期，已自动对齐，请重新操作',
+              reason: denied.includes('对方的卡') || denied.includes('对方') ? 'forbidden' : 'stale',
+              message: denied,
             } satisfies NetAck);
-            sendStateTo(id, before);
+            if (denied.includes('时点')) sendStateTo(id, before); // 画面过期 → 补发整份让他重新对齐
             return;
           }
           const after = applyAction(before, m.action ?? '', m.args ?? []);
-          commitGs(after);
-          // 回执等状态广播时一起发（这样 rev 里包含这次改动）
-          pendingAcksRef.current.push({ opId, ok: true });
+          const changed = after !== before;
+          if (changed) commitGs(after);
+          // 立刻回执（不能挂在"状态广播"上）：有些操作不会产生变化（条件不满足时规则函数直接返回原状态），
+          // 这时 React 不会重渲染 → 状态 effect 不执行 → 客机会一直卡在「等待房主确认」。
+          setTimeout(() => {
+            try {
+              relay.sendTo(id, {
+                type: 'ack',
+                opId,
+                ok: true,
+                rev: currentRev(),
+                message: changed ? undefined : '（这次操作没有产生变化：条件不满足？）',
+              } satisfies NetAck);
+            } catch {
+              /* 忽略 */
+            }
+          }, 80);
           return;
         } else if (m.type === 'undoRequest') {
           // 客机请求悔棋 → 房主弹确认（同意后恢复房主历史栈并广播）
@@ -989,8 +1004,14 @@ export default function Battlefield({
             setDiag((d) => ({ ...d, pending: pendingOpsRef.current.size, rev: m.rev }));
             setPendingLabel(pendingOpsRef.current.size > 0 ? [...pendingOpsRef.current.values()][0].label : '');
             if (!m.ok) {
-              setAlignMsg(m.reason === 'stale' ? '⚠ 你的画面已过期，已自动对齐，请重新操作' : `⚠ 操作未生效：${m.message ?? m.reason ?? '未知原因'}`);
-              pushPktLog(`← 回执失败 ${m.opId} reason=${m.reason ?? ''}`);
+              setAlignMsg(
+                m.reason === 'forbidden'
+                  ? `⚠ 操作被拒绝：${m.message ?? '不能操作对方的卡'}`
+                  : m.reason === 'stale'
+                    ? '⚠ 你的画面已过期，已自动对齐，请重新操作'
+                    : `⚠ 操作未生效：${m.message ?? m.reason ?? '未知原因'}`,
+              );
+              pushPktLog(`← 回执失败 ${m.opId} reason=${m.reason ?? ''} ${m.message ?? ''}`);
             } else {
               pushPktLog(`← 回执成功 ${m.opId} rev=${m.rev}`);
             }
@@ -1043,11 +1064,10 @@ export default function Battlefield({
       }
     });
     const offClosed = relay.onClosed(() => {
-      setRoom(null);
-      setMyCid(null);
-      setMode('local');
-      setNetStatus('与服务器断开（回到单机模式）');
-      setGs(startGame(cards, deck));
+      // 联机断开：不再静默退回"单机模式"（那会让两边都能操作，看起来像 bug），改为明确提示并冻结操作
+      setDisconnected(true);
+      setNetStatus('⚠ 与服务器断开连接');
+      setAlignMsg('⚠ 与服务器断开连接：对局已暂停。请返回主菜单重新进入房间（对方仍可继续等待重连）。');
       setSelected(null);
     });
     return () => {
@@ -1210,8 +1230,12 @@ export default function Battlefield({
   const selLoc = selected ? findInstance(gs, selected) : null;
   const selInst = selLoc ? getInstAt(gs, selLoc) : undefined;
   const selCard = selInst ? gs.cardsById[selInst.cardId] : undefined;
-  const selInHand = selLoc?.zone === 'hand' && selLoc.player === gs.turnPlayer;
-  const selInMyHand = selLoc?.zone === 'hand' && selLoc.player === selfPlayer;
+  /* 「我现在能操作谁」：联机时=我自己那个座位；单机（同一台电脑双人）=当前回合玩家。
+     以前一律用 gs.turnPlayer 判断 → 联机时客机在对方回合会把「对方的卡」当成可操作卡（越权 bug）。 */
+  const actPlayer: PlayerIndex | null = mode === 'local' ? gs.turnPlayer : myPlayer >= 0 ? (myPlayer as PlayerIndex) : null;
+  const selIsMine = actPlayer !== null && !!selLoc && selLoc.player === actPlayer;
+  const selInHand = selLoc?.zone === 'hand' && selIsMine;
+  const selInMyHand = selInHand;
   const mainPhase = gs.phase === 'main' && !gs.battle && !gs.prompt;
 
   /* ===== 顶部按钮动作 ===== */
@@ -1269,17 +1293,17 @@ export default function Battlefield({
   const canPlayEvent = !!selected && selCard?.type === 'event' && selInHand && mainPhase;
   const canPlayArea = !!selected && selCard?.type === 'area' && selInHand && mainPhase;
   const canEquip = !!selected && selCard?.type === 'item' && selInHand && mainPhase;
-  const canAttackNow = !!selected && rules.canAttack(gs, selected);
+  const canAttackNow = !!selected && selIsMine && rules.canAttack(gs, selected);
   const canToggle = !!selected && !gs.battle && !gs.prompt && mode === 'local';
   // 手札宣言 / 宣言效果 / 基本能力移动 / コスト能力
-  // 手札宣言：自己手牌且非战斗即可（可作对手回合的响应）
-  const canHandDeclare = !!selected && selCard && selInMyHand && gs.phase === 'main' && !gs.battle && !gs.prompt && hasHandDeclare(selCard);
+  // 手札宣言：自己的手牌且非战斗即可（可作对手回合的响应）
+  const canHandDeclare = !!selected && selCard && selInHand && gs.phase === 'main' && !gs.battle && !gs.prompt && hasHandDeclare(selCard);
   const canDeclare =
-    !!selected && !!selCard && (selLoc?.zone === 'field' || selLoc?.zone === 'special' || selLoc?.zone === 'area') && selLoc.player === gs.turnPlayer && mainPhase && hasDeclare(selCard);
+    !!selected && !!selCard && (selLoc?.zone === 'field' || selLoc?.zone === 'special' || selLoc?.zone === 'area') && selIsMine && mainPhase && hasDeclare(selCard);
   // 装备中的道具宣言
   const equipDeclare = selInst?.equip && gs.cardsById[selInst.equip.cardId] && hasDeclare(gs.cardsById[selInst.equip.cardId]);
-  const canItemDeclare = !!selected && !!equipDeclare && selLoc?.zone === 'field' && selLoc.player === gs.turnPlayer && mainPhase;
-  const canMove = !!selected && selCard && selLoc?.zone === 'field' && selLoc.player === gs.turnPlayer && mainPhase && hasMoveAbility(selCard);
+  const canItemDeclare = !!selected && !!equipDeclare && selLoc?.zone === 'field' && selIsMine && mainPhase;
+  const canMove = !!selected && selCard && selLoc?.zone === 'field' && selIsMine && mainPhase && hasMoveAbility(selCard);
 
   const selectedActions: { label: string; fn: () => void }[] = [];
   // 观战者无任何操作
@@ -1301,7 +1325,7 @@ export default function Battlefield({
         if (selCard && hasHandDeclare(selCard)) selectedActions.push({ label: '📣 手札宣言（用后进ゴミ箱）', fn: () => selected && winAction(`hd:${selected}`) });
         if (selCard && (selCard.basicAbilities ?? '').includes('サプライズ')) selectedActions.push({ label: '🎴 サプライズ登场', fn: () => selected && winAction(`sdp:${selected}`) });
       }
-      if (selInst && (selLoc?.zone === 'field' || selLoc?.zone === 'special' || selLoc?.zone === 'area')) {
+      if (selInst && selIsMine && (selLoc?.zone === 'field' || selLoc?.zone === 'special' || selLoc?.zone === 'area')) {
         if (selCard && hasDeclare(selCard)) selectedActions.push({ label: '📣 宣言效果', fn: () => selected && winAction(`fd:${selected}`) });
         if (timingPrompt!.kind === 'battle-timing' && selLoc?.zone === 'field' && selInst) {
           const sup = rules.canSupportInBattle(gs, selInst.uid);
@@ -1310,7 +1334,7 @@ export default function Battlefield({
           }
         }
       }
-      if (selInst?.equip && gs.cardsById[selInst.equip.cardId] && hasDeclare(gs.cardsById[selInst.equip.cardId])) {
+      if (selIsMine && selInst?.equip && gs.cardsById[selInst.equip.cardId] && hasDeclare(gs.cardsById[selInst.equip.cardId])) {
         selectedActions.push({ label: `📣 道具宣言（${gs.cardsById[selInst.equip.cardId]?.name ?? ''}）`, fn: () => selInst!.equip && winAction(`fd:${selInst.equip.uid}`) });
       }
       if (selectedActions.length === 0) selectedActions.push({ label: '该卡当前不能用于对应/时点宣言', fn: () => {} });
@@ -1364,7 +1388,7 @@ export default function Battlefield({
     // 登场模式：点己方场上的角色 → エンゲージ登场（破弃该角色；卡无[エンゲージ]会被规则拒绝）
     if (deploySlotUid) {
       const clickLoc = findInstance(gs, uid);
-      if (clickLoc?.zone === 'field' && clickLoc.player === gs.turnPlayer) {
+      if (clickLoc?.zone === 'field' && actPlayer !== null && clickLoc.player === actPlayer) {
         doAction('requestPlayCharacter', deploySlotUid, clickLoc.row!, clickLoc.area!);
         setDeploySlotUid(null);
         setSelected(null);
@@ -1422,7 +1446,7 @@ export default function Battlefield({
     if (deploySlotUid) {
       const valid = rules
         .validDeploySlots(gs, gs.turnPlayer, deploySlotUid)
-        .some((t) => t.row === row && t.area === area && player === gs.turnPlayer);
+        .some((t) => t.row === row && t.area === area && actPlayer !== null && player === actPlayer);
       if (valid) {
         doAction('requestPlayCharacter', deploySlotUid, row, area);
       }
@@ -1432,7 +1456,7 @@ export default function Battlefield({
     }
     // 移动模式：点可移动的目标空位 → 移动；点别处取消
     if (moveModeUid) {
-      const valid = rules.validMoveTargets(gs, moveModeUid).some((t) => t.row === row && t.area === area && player === gs.turnPlayer);
+      const valid = rules.validMoveTargets(gs, moveModeUid).some((t) => t.row === row && t.area === area && actPlayer !== null && player === actPlayer);
       if (valid) {
         doAction('moveCharacter', moveModeUid, row, area);
       }
@@ -1444,7 +1468,7 @@ export default function Battlefield({
     const loc = findInstance(gs, selected);
     const inst = loc ? getInstAt(gs, loc) : undefined;
     const card = inst ? gs.cardsById[inst.cardId] : undefined;
-    if (loc?.zone === 'hand' && card?.type === 'character' && player === gs.turnPlayer) {
+    if (loc?.zone === 'hand' && card?.type === 'character' && actPlayer !== null && player === actPlayer) {
       doAction('requestPlayCharacter', selected, row, area);
       setSelected(null);
       return;
@@ -1608,6 +1632,7 @@ export default function Battlefield({
       </header>
 
       <div className="net-bar">
+        {disconnected && <span className="net-offline">⚠ 已断开连接（操作已冻结，请返回主菜单）</span>}
         {mode === 'local' && (
           <>
             <button onClick={onCreateRoom}>🌐 创建房间（房主）</button>

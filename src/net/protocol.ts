@@ -1,6 +1,7 @@
 // 联机协议：消息类型、动作定义与映射
 // 房主权威：客户端发送动作，房主应用规则并广播状态（玩家2 + 观战者）
 import type { GameState, PlayerIndex, RowName, AreaIndex } from '../core/game';
+import { findInstance } from '../core/game';
 import type { RoomState } from '../core/room';
 import type { StatePacket } from './gsSync';
 import * as rules from '../core/rules';
@@ -198,6 +199,50 @@ export function applyAction(gs: GameState, action: string, args: unknown[]): Gam
 
 /** 客机动作的权限校验：该动作是否允许由 guestPlayer 发起 */
 export function canGuestAct(gs: GameState, action: string, guestPlayer: PlayerIndex): boolean {
+  return guestActDenied(gs, action, [], guestPlayer) === null;
+}
+
+/**
+ * 客机动作的综合校验（房主侧权威）：
+ *   ① 时点/回合/提示归属是否属于该客机（原来的 canGuestAct 逻辑）
+ *   ② **参数里的卡是否属于该客机**（联机越权防护：不能操作对手的卡）
+ * 返回 null = 允许；否则返回中文原因（可直接提示给玩家）。
+ */
+export function guestActDenied(gs: GameState, action: string, args: unknown[], guestPlayer: PlayerIndex): string | null {
+  if (!turnOrWindowOk(gs, action, guestPlayer)) return '现在不是你的操作时点';
+  const own = (u: unknown): boolean => {
+    const uid = typeof u === 'string' ? u : '';
+    if (!uid) return true; // 空参数（如「不防御」）由具体规则处理
+    const loc = findInstance(gs, uid);
+    return !!loc && loc.player === guestPlayer;
+  };
+  const uid0Actions = [
+    'requestPlayCharacter',
+    'requestPlayEvent',
+    'requestPlayArea',
+    'requestHandDeclare',
+    'requestDeclare',
+    'requestEquipTarget',
+    'moveCharacter',
+    'declareAttack',
+    'useCostAbility',
+    'useCostAbilityInPay',
+  ];
+  if (uid0Actions.includes(action) && !own(args?.[0])) return '不能使用对方的卡';
+  if (action === 'requestEquipItem') {
+    if (!own(args?.[0])) return '不能使用对方的道具';
+    if (!own(args?.[1])) return '不能装备到对方的角色';
+  }
+  if ((action === 'chooseDefense' || action === 'chooseSearchDeploy') && !own(args?.[0])) return '不能选择对方的角色';
+  if (action === 'respond' || action === 'battleTimingAction' || action === 'endMainAction') {
+    const [kind, uid] = String(args?.[0] ?? '').split(':');
+    if (uid && ['evt', 'hd', 'fd', 'sup', 'supC', 'sdp'].includes(kind) && !own(uid)) return '不能使用对方的卡';
+  }
+  return null;
+}
+
+/** 时点/回合/提示归属校验（原 canGuestAct 的判断） */
+function turnOrWindowOk(gs: GameState, action: string, guestPlayer: PlayerIndex): boolean {
   // 提示类动作：只有提示归属方可以操作
   const prompt = gs.prompt;
   const owner = prompt ? promptOwner(prompt, gs.turnPlayer) : null;

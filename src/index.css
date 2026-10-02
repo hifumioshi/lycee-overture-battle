@@ -2072,6 +2072,15 @@ body {
   font-size: 13px;
   display: inline-block;
 }
+.net-offline {
+  padding: 4px 10px;
+  border-radius: 14px;
+  background: #3a1a1a;
+  border: 1px solid #b45050;
+  color: #ff9d9d;
+  font-size: 12px;
+  font-weight: 700;
+}
 .deck-chip .deck-song-chip { color: #ffd75e; margin-left: 2px; }
 .song-playing-btn {
   border-color: #b48a3b !important;

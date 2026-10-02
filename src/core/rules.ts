@@ -27,6 +27,24 @@ function cardName(gs: GameState, uid: string): string {
   return inst ? (gs.cardsById[inst.cardId]?.name ?? inst.cardId) : '?';
 }
 
+/* ===== 联机越权防护 =====
+   从"端口映射直连"换成"公网服务器联机"后，客户端不再互相信任：
+   房主是权威端，必须自己校验"这张卡/这个目标是不是行动方的"，
+   否则客机（或改过的客户端）能发动对手的卡。以下两个小工具供各入口使用。 */
+
+/** 该 uid 是否属于玩家 p（手中/场上/置き場/装备/除外都算） */
+function ownsUid(gs: GameState, p: PlayerIndex, uid: string): boolean {
+  const loc = findLoc(gs, uid);
+  return !!loc && loc.player === p;
+}
+
+/** 越权拒绝：返回带日志的（克隆）状态，让双方日志都能看到被拒绝的原因 */
+function denyForeign(gs: GameState, what: string): GameState {
+  const next = clone(gs);
+  log(next, `⚠ 越权操作被拒绝：不能${what}对方的卡。`);
+  return next;
+}
+
 function findInst(gs: GameState, uid: string): CardInstance | null {
   for (const p of [0, 1] as PlayerIndex[]) {
     const st = gs.players[p];
@@ -946,6 +964,9 @@ export function requestHandDeclare(gs: GameState, uid: string): GameState {
     log(next, '非回合玩家只能在対応或自由时点使用手札宣言。');
     return next;
   }
+  // 联机越权防护：主阶段（无対応/战斗时点）只允许回合玩家用自己的手牌宣言；
+  // 非回合玩家的手札宣言必须走対応/战斗时点窗口（那里会校验窗口归属）
+  if (!next.response && !next.battle && owner !== next.turnPlayer) return denyForeign(next, '手札宣言');
   const card = next.cardsById[inst.cardId];
   if (!card || !hasHandDeclare(card)) return gs;
   // 卡面时点限制：主阶段正常使用也校验
@@ -2978,12 +2999,23 @@ export function respond(gs: GameState, optId: string): GameState {
   const next = clone(gs);
   const prompt = next.prompt;
   if (!prompt || prompt.kind !== 'response' || !next.response) return gs;
-  next.prompt = null;
   const owner = next.response.awaiting;
   if (optId === 'pass') {
+    next.prompt = null;
     log(next, `玩家 ${owner + 1} 放弃对应，对应链倒序结算（后发先至）。`);
     return resolveResponse(next);
   }
+  // 越权防护（在清空提示之前判）：窗口属于谁就只能用谁的卡；
+  // 被拒绝时**保留窗口**，让玩家重新选择或放弃（否则提示被清掉会卡住整局）。
+  const [kind0, uid0] = optId.split(':');
+  if (uid0 && ['evt', 'hd', 'fd', 'sup', 'supC', 'sdp'].includes(kind0)) {
+    const loc0 = findLoc(next, uid0);
+    if (!loc0 || loc0.player !== owner) {
+      log(next, '⚠ 越权操作被拒绝：不能使用对方的卡。');
+      return next;
+    }
+  }
+  next.prompt = null;
   pushVoice(next, owner, 'respond'); // 语音：对应宣言（放弃对应不算）
   return startWindowAction(next, owner, optId, true);
 }
@@ -3034,22 +3066,36 @@ function startWindowAction(gs: GameState, owner: PlayerIndex, optId: string, isR
   if (kind === 'hd') {
     const loc = findLoc(gs, uid);
     if (!loc || loc.zone !== 'hand') return gs;
+    // 联机越权防护：窗口属于谁，就只能用谁的卡（以前用 loc.player 当行为者 → 客机能发动对手的手牌宣言）
+    if (loc.player !== owner) {
+      const denied = clone(gs);
+      log(denied, '⚠ 越权操作被拒绝：不能使用对方的卡。');
+      return denied;
+    }
     const card = gs.cardsById[loc.inst.cardId];
     if (!card || !hasHandDeclare(card)) return gs;
-    return openDeclared(gs, loc.player, uid, '手札宣言', { inBattle: !!(gs.battle && gs.battle.active), hasDefender: !!gs.battle?.defenderUid, isResponse, ownTurn: owner === gs.turnPlayer });
+    return openDeclared(gs, owner, uid, '手札宣言', { inBattle: !!(gs.battle && gs.battle.active), hasDefender: !!gs.battle?.defenderUid, isResponse, ownTurn: owner === gs.turnPlayer });
   }
   if (kind === 'fd') {
     const loc = findLoc(gs, uid);
     if (!loc || (loc.zone !== 'field' && loc.zone !== 'special' && loc.zone !== 'equip' && loc.zone !== 'area')) return gs;
+    // 联机越权防护：只能发动自己的场上/エリア/道具宣言
+    if (loc.player !== owner) {
+      const denied = clone(gs);
+      log(denied, '⚠ 越权操作被拒绝：不能使用对方的卡。');
+      return denied;
+    }
     const card = gs.cardsById[loc.inst.cardId];
     if (!card || !hasDeclare(card)) return gs;
-    return openDeclared(gs, loc.player, uid, '宣言', { inBattle: !!(gs.battle && gs.battle.active), hasDefender: !!gs.battle?.defenderUid, isResponse, ownTurn: owner === gs.turnPlayer });
+    return openDeclared(gs, owner, uid, '宣言', { inBattle: !!(gs.battle && gs.battle.active), hasDefender: !!gs.battle?.defenderUid, isResponse, ownTurn: owner === gs.turnPlayer });
   }
   if (kind === 'sup' && isResponse === false) {
+    if (!ownsUid(gs, owner, uid)) return denyForeign(gs, '支援');
     return doSupportInBattle(gs, owner, uid, false);
   }
   if (kind === 'supC' && isResponse === false) {
     // [サポーター]：支付费用代替行动済み的支援
+    if (!ownsUid(gs, owner, uid)) return denyForeign(gs, 'サポーター支援');
     return doSupportInBattle(gs, owner, uid, true);
   }
   if (kind === 'sdp') {
@@ -3095,8 +3141,17 @@ export function battleTimingAction(gs: GameState, optId: string): GameState {
   let next = clone(gs);
   const prompt = next.prompt;
   if (!prompt || prompt.kind !== 'battle-timing' || !next.battle) return gs;
-  next.prompt = null;
   const player = prompt.owner;
+  // 越权防护（清空提示之前判）：时点属于谁就只能用谁的卡；被拒绝时保留提示让玩家重选
+  const [kind0, uid0] = optId.split(':');
+  if (uid0 && ['evt', 'hd', 'fd', 'sup', 'supC', 'sdp'].includes(kind0)) {
+    const loc0 = findLoc(next, uid0);
+    if (!loc0 || loc0.player !== player) {
+      log(next, '⚠ 越权操作被拒绝：不能使用对方的卡。');
+      return next;
+    }
+  }
+  next.prompt = null;
   if (optId === 'end') {
     // 双方连续放弃才结算战斗（Bug 16）
     if (next.battle.lastPass) {
