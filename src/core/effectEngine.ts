@@ -1351,6 +1351,13 @@ export function finalizeActions(gs: GameState, pending: PendingEffect): GameStat
         pushLog(next, `「${cardName(next, p2.sourceUid)}」：没有可选的卡（${isDiscard ? '充能为空' : 'ゴミ箱为空'}），跳过。`);
         continue;
       }
+      // 已经问过一次、玩家确认了 0 张 → 视为放弃这次放置（否则会反复弹同一个面板，卡住）
+      if (p2.pickAsked) {
+        pushLog(next, `「${cardName(next, p2.sourceUid)}」：选择不放置，跳过。`);
+        p2.pickAsked = false;
+        continue;
+      }
+      p2.pickAsked = true;
       const zone = isDiscard ? 'charge' : 'trash';
       const purpose = ({ store: 'store', storeUnder: 'storeUnder', storeUnderArea: 'storeUnder', charge: 'charge', discardCharge: 'discardCharge' } as const)[act.t];
       const title =

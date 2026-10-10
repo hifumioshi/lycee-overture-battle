@@ -1642,7 +1642,11 @@ export function chooseSlot(gs: GameState, row: RowName, area: AreaIndex): GameSt
   const next = clone(gs);
   const prompt = next.prompt;
   if (!prompt || prompt.kind !== 'slot-pick') return gs;
-  if (!prompt.slots.some((s) => s.row === row && s.area === area)) return gs;
+  if (!prompt.slots.some((s) => s.row === row && s.area === area)) {
+    // 以前这里静默返回 → 玩家点了没反应、看着像"卡住不能选择"。现在给出明确提示。
+    log(next, `⚠ 这个位置不能选择（${row === 'AF' ? '前列' : '后列'}·${['左', '中', '右'][area]}），请点高亮的空格。`);
+    return next;
+  }
   next.prompt = null;
   const owner = prompt.owner;
   const st = next.players[owner];
@@ -1669,7 +1673,16 @@ export function chooseSlot(gs: GameState, row: RowName, area: AreaIndex): GameSt
         idx = ti;
       }
     }
-    if (!inst || idx < 0) return next;
+    if (!inst || idx < 0) {
+      // 同上：找不到检索目标时不再静默停住，给出提示并继续后续流程（避免无限循环）
+      log(next, '⚠ 找不到检索到的卡（可能已被移动），跳过登场。');
+      next.prompt = null;
+      if (prompt.pending) {
+        prompt.pending.searchDone = true;
+        return maybeResumeEndTurn(eng.finalizeActions(next, prompt.pending));
+      }
+      return next;
+    }
     if (zone === 'deck') st.deck.splice(idx, 1);
     else st.trash.splice(idx, 1);
     place(inst, false, '检索登场');
@@ -1700,7 +1713,16 @@ export function chooseSlot(gs: GameState, row: RowName, area: AreaIndex): GameSt
         idx = ti;
       }
     }
-    if (!inst || idx < 0) return next;
+    if (!inst || idx < 0) {
+      // 以前这里静默返回 → 提示不消失、玩家看着"卡住"（实测会无限循环）。现在给出提示并继续后面的流程。
+      log(next, '⚠ 找不到要配置的那张エリア卡（可能已被移动），跳过配置。');
+      next.prompt = null;
+      if (prompt.pending) {
+        prompt.pending.searchDone = true;
+        return maybeResumeEndTurn(eng.finalizeActions(next, prompt.pending));
+      }
+      return next;
+    }
     if (zone === 'deck') st.deck.splice(idx, 1);
     else st.trash.splice(idx, 1);
     inst.faceUp = true;
@@ -1721,9 +1743,13 @@ export function chooseSlot(gs: GameState, row: RowName, area: AreaIndex): GameSt
   if (prompt.purpose === 'areaPlaceHand') {
     // 手牌配置エリア：位置已选 → 费用选择后配置（配置宣言可被对应，进対応链）
     const inst2 = findInst(next, prompt.uid);
-    if (!inst2) return next;
-    const card2 = next.cardsById[inst2.cardId];
-    if (!card2) return next;
+    const card2 = inst2 ? next.cardsById[inst2.cardId] : undefined;
+    if (!inst2 || !card2) {
+      // 同上：不再静默返回（否则玩家点了没反应、看着像卡住）
+      log(next, '⚠ 找不到要配置的エリア卡（可能已被移动），配置取消。');
+      next.prompt = null;
+      return next;
+    }
     const restCost = poolAdjustedCost(next, owner, card2.cost, { kind: 'deploy', card: card2 });
     if (restCost && !canPayCost(next, owner, restCost, prompt.uid) && !canCostPoolCover(next, owner, restCost, { kind: 'deploy', card: card2 })) {
       log(next, `费用不足：无法配置「${card2.name}」（费用 ${card2.cost || '无'}）。`);

@@ -46,6 +46,7 @@ export interface PendingEffect {
   scanAll?: boolean; // 触发来自全卡扫描（turnStart 等多触发时恢复链要保持全局扫描）
   scanTrigger?: string; // __triggerPick：记录原触发类别（供选择顺序后继续扫描）
   placedAny?: boolean; // 最近一次 store/storeUnder 是否实际放置了卡（置いたとき才抽）
+  pickAsked?: boolean; // 放置/充能类选卡面板是否已问过一次（玩家确认 0 张 → 视为放弃，避免反复弹面板卡住）
   equipPaid?: boolean; // 效果装备的费用已支付（装备支付后恢复链跳过重复付费）
   equippedUid?: string | null; // 刚被效果装备的道具 uid（装備したとき诱発用）
   searchEquip?: { itemUid: string; free: boolean } | null; // 检索装备：待装备的道具（6887）
