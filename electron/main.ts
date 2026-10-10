@@ -4,6 +4,23 @@ import * as path from 'path';
 import { pathToFileURL } from 'url';
 import { WebSocketServer, WebSocket } from 'ws';
 import { autoUpdater } from 'electron-updater';
+import { canIncrementalUpdate, checkAndStage, type IncrStatus } from './incrUpdate';
+
+/** 内容是分层的：bootstrap.js 决定了内容根目录（可被增量更新替换），这里读它留下的环境变量 */
+function contentVersion(): string {
+  return process.env.LYCEE_CONTENT_VERSION || app.getVersion();
+}
+
+/** 启动成功 → 清零"启动尝试次数"（连续两次失败 bootstrap 会回退到上一版本） */
+function markBooted(): void {
+  const root = process.env.LYCEE_APP_ROOT;
+  if (!root) return;
+  try {
+    fs.writeFileSync(path.join(root, 'state.json'), JSON.stringify({ bootAttempts: 0, pendingVersion: '' }, null, 2), 'utf-8');
+  } catch {
+    /* 忽略（只读目录等） */
+  }
+}
 
 // 战歌 / 语音 自定义协议（本地播放 mp3/wav/ogg/m4a）：
 //   song://local/<文件名>
@@ -216,6 +233,9 @@ function createWindow(): BrowserWindow {
     return { action: 'deny' };
   });
 
+  // 界面加载成功 = 这次启动没问题（清零"启动尝试次数"，避免连续失败计数误触发回退）
+  win.webContents.once('did-finish-load', () => markBooted());
+
   const devServerUrl = process.env.VITE_DEV_SERVER_URL;
   if (devServerUrl) {
     void win.loadURL(devServerUrl);
@@ -252,11 +272,31 @@ function createWindow(): BrowserWindow {
                 const name = document.querySelector('.modal-info h2')?.textContent ?? '';
                 const log = [...document.querySelectorAll('.battle-log div')].map((e) => e.textContent).join(' | ');
                 const prompt = document.querySelector('.prompt-modal h3')?.textContent ?? '';
-                return JSON.stringify({ active, zones, slots, tags, name, log, prompt }, null, 2);
+                const badge = (document.querySelector('.ver-badge')?.textContent ?? '').replace(/\\s+/g, ' ').trim();
+                return JSON.stringify({ active, zones, slots, tags, name, log, prompt, badge }, null, 2);
               })()`,
             );
             fs.writeFileSync(dumpPath, dump, 'utf-8');
             console.log(`[dump] saved to ${dumpPath}`);
+          }
+          // 可选：SHOT_UPDATE 指向的文件路径，无头验证「增量更新」真实跑一遍（检查 → 下载 → 状态）
+          const updPath = process.env.SHOT_UPDATE ?? '';
+          if (updPath) {
+            const upd = await win.webContents.executeJavaScript(`(async () => {
+              const out = {};
+              try {
+                out.mode = await window.lyceeApp.updateMode();
+                out.before = await window.lyceeApp.updateStatus();
+                out.after = await window.lyceeApp.checkUpdate();
+                out.version = await window.lyceeApp.version();
+                out.badge = (document.querySelector('.ver-badge')?.textContent ?? '').replace(/\\s+/g, ' ').trim();
+              } catch (e) {
+                out.error = String(e);
+              }
+              return out;
+            })()`);
+            fs.writeFileSync(updPath, JSON.stringify(upd, null, 2), 'utf-8');
+            console.log(`[update] saved to ${updPath}`);
           }
           // 可选：SHOT_TEST 指向的文件路径，模拟点击操作并导出结果（无头交互自检）
           const testPath = process.env.SHOT_TEST ?? '';
@@ -678,6 +718,8 @@ void app.whenReady().then(() => {
       return new Response('', { status: 404 });
     }
   });
+  // 数据目录（relay.txt / update.txt 所在处）传给增量更新模块
+  process.env.LYCEE_DATA_DIR = path.join(app.getPath('userData'), '..');
   const win = createWindow();
   setupNetIpc(win);
   setupUpdater(win);
@@ -686,6 +728,17 @@ void app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+/** 递归复制目录（不用 fs.cpSync：Node 24 复制大目录树会崩，实测 0xC0000409） */
+function copyDirDeep(src: string, dst: string): void {
+  fs.mkdirSync(dst, { recursive: true });
+  for (const e of fs.readdirSync(src, { withFileTypes: true })) {
+    const s = path.join(src, e.name);
+    const d = path.join(dst, e.name);
+    if (e.isDirectory()) copyDirDeep(s, d);
+    else if (e.isFile()) fs.copyFileSync(s, d);
+  }
+}
 
 /** 第一次以安装版启动时，提供"导入旧版 data 目录"的引导（卡组/战歌/语音不丢） */
 async function offerLegacyImport(win: BrowserWindow): Promise<void> {
@@ -715,7 +768,7 @@ async function offerLegacyImport(win: BrowserWindow): Promise<void> {
       return;
     }
     fs.mkdirSync(target, { recursive: true });
-    fs.cpSync(dataSrc, target, { recursive: true });
+    copyDirDeep(dataSrc, target);
     await dialog.showMessageBox(win, { message: '导入完成！请关闭并重新打开程序。', buttons: ['好'] });
   } catch (e) {
     console.warn('[data] 导入旧数据失败：', e);
@@ -723,19 +776,24 @@ async function offerLegacyImport(win: BrowserWindow): Promise<void> {
 }
 
 /* ================= 在线更新（类似网游：打开游戏自动检查 / 一键更新） =================
-   更新源：GitHub Releases（package.json 的 build.publish 里配置）。
-   只有"安装版（NSIS）"能自动更新；便携版/解压版会提示去下载安装包。 */
+   两条路：
+   1) 增量更新（主要）：服务器放 manifest.json（每个文件的 sha256），客户端只下载「哈希变了」的文件，
+      改代码通常几百 KB；下载到 <appRoot>/staged，下次启动由 bootstrap.js 原子替换，失败自动回退上一版本。
+   2) 完整安装包（兜底）：安装版仍保留 electron-updater 走 GitHub Releases，供"增量源连不上"时手动下载整个安装包。
+   更新源：data/update.txt（一行 http 地址）> 与中继同机同端口 /updates/ > 内置默认。 */
 type UpdateStatus =
   | { state: 'idle' }
   | { state: 'checking' }
   | { state: 'latest'; version: string }
-  | { state: 'available'; version: string }
-  | { state: 'downloading'; percent: number; version: string }
-  | { state: 'ready'; version: string }
+  | { state: 'available'; version: string; bytes?: number; files?: number }
+  | { state: 'downloading'; percent: number; version: string; got?: number; total?: number; files?: number }
+  | { state: 'ready'; version: string; bytes?: number; files?: number }
   | { state: 'error'; message: string }
   | { state: 'unsupported'; message: string };
 
 let lastUpdateStatus: UpdateStatus = { state: 'idle' };
+/** 已经有下载并校验完成、等待重启生效的增量更新 */
+let stagedIncremental = false;
 
 function setupUpdater(win: BrowserWindow): void {
   const push = (s: UpdateStatus) => {
@@ -747,9 +805,26 @@ function setupUpdater(win: BrowserWindow): void {
     }
   };
 
-  ipcMain.handle('app:version', () => app.getVersion());
+  // 增量更新状态回调（与 electron-updater 共用同一套 UpdateStatus，左下角显示不变）
+  const pushIncr = (s: IncrStatus) => {
+    if (s.state === 'ready') stagedIncremental = true;
+    push(s as UpdateStatus);
+  };
+  const incremental = canIncrementalUpdate();
+
+  ipcMain.handle('app:version', () => contentVersion());
   ipcMain.handle('app:update-status', () => lastUpdateStatus);
+  // 更新模式：界面用来说明"当前是增量更新还是完整安装包更新"
+  ipcMain.handle('app:update-mode', () => ({
+    incremental,
+    contentVersion: contentVersion(),
+    appVersion: app.getVersion(),
+  }));
   ipcMain.handle('app:check-update', async () => {
+    if (incremental) {
+      await checkAndStage({ onStatus: pushIncr });
+      return lastUpdateStatus;
+    }
     if (!app.isPackaged) {
       push({ state: 'unsupported', message: '开发模式下不检查更新' });
       return lastUpdateStatus;
@@ -767,6 +842,12 @@ function setupUpdater(win: BrowserWindow): void {
     return lastUpdateStatus;
   });
   ipcMain.handle('app:install-update', () => {
+    // 增量更新：内容已下载并校验完毕，重启即生效（bootstrap 在启动最早期替换文件）
+    if (stagedIncremental) {
+      app.relaunch();
+      app.exit(0);
+      return { ok: true };
+    }
     try {
       autoUpdater.quitAndInstall(false, true);
       return { ok: true };
@@ -783,7 +864,15 @@ function setupUpdater(win: BrowserWindow): void {
     }
   });
 
-  if (!app.isPackaged) return; // 开发模式不启用
+  // 增量更新可用时：启动 5 秒后自动检查（只下载变化的文件，失败不影响游戏）
+  if (incremental) {
+    setTimeout(() => {
+      void checkAndStage({ onStatus: pushIncr });
+    }, 5000);
+    return;
+  }
+
+  if (!app.isPackaged) return; // 开发模式不启用完整安装包更新
   autoUpdater.autoDownload = true; // 发现新版本就后台下载，下载完提示重启
   autoUpdater.autoInstallOnAppQuit = true;
   autoUpdater.on('checking-for-update', () => push({ state: 'checking' }));

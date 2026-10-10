@@ -39,7 +39,8 @@ Electron + React + TypeScript desktop client, with a tiny self-hostable relay se
 | ✅ 操作确认 | 客机操作带编号与版本号，房主回执后才解锁；画面过期会自动重对齐并提示重新操作 |
 | 🔒 校验码 | 每个状态包带整份状态校验码（类似魔兽争霸自定义地图的"不同步"检测），另有每 5 秒的迷你心跳比对 |
 | 🔍 同步诊断 | 底部状态栏显示：往返延迟 / 状态版本 / 校验码 / 待确认操作 / 对方是否已同步（点开看最近 10 个包） |
-| 🧪 测试 | 5 套自动化测试共 **389 条断言**（规则 314 / 增量同步 22 / 语音映射 22 / 语音接线 20 / 中继协议 11） |
+| 🔄 增量更新 | 像网游一样**只下载改动的文件**（引擎只装一次；改代码实测只下 **0.44 MB**，卡图不变就不重复下），逐文件 sha256 校验、暂存后重启原子替换、连续启动失败自动回退 |
+| 🧪 测试 | 8 套自动化测试共 **462 条断言**（规则 314 / 增量同步 22 / 语音映射 22 / 语音接线 20 / 权限 19 / LO-6960 卡死回归 20 / 增量更新 34 / 中继协议 11） |
 
 ### 联机同步是怎么保证不出错的
 
@@ -73,8 +74,9 @@ npm run dev
 ### 打包 / Build
 
 ```bash
-npm run build     # 构建渲染端 + 主进程
-npm run dist      # electron-builder 打成 Windows 便携版（输出 release/）
+npm run build            # 构建渲染端 + 主进程
+npm run pack:update      # 生成 baseline/（安装包自带内容）+ updates-dist/（增量更新清单与文件实体）
+npm run dist             # = build + pack:update + electron-builder（安装包 + 便携版）
 ```
 
 ### 测试 / Tests
@@ -83,10 +85,13 @@ npm run dist      # electron-builder 打成 Windows 便携版（输出 release/�
 npx tsc --noEmit                         # 渲染端类型检查
 npx tsc -p tsconfig.electron.json --noEmit
 npx tsx tools/test-rules.ts              # 规则引擎（314）
-npx tsx tools/test-gssync.ts             # 增量同步（11）
-npx tsx tools/test-voice.ts              # 语音映射（23）
+npx tsx tools/test-gssync.ts             # 增量同步（22）
+npx tsx tools/test-voice.ts              # 语音映射（22）
 npx tsx tools/test-voice-actions.ts      # 语音行为接线（20）
-npx tsx tools/test-relay.mjs             # 中继协议（11）
+npx tsx tools/test-perms.ts              # 联机权限（19）
+npx tsx tools/test-6960.ts               # 选卡/选位置静默卡死回归（20）
+npx tsx tools/test-incr-update.ts        # 增量更新（34，含真实 HTTP 分发 + 下载校验）
+node tools/test-relay.mjs                # 中继协议（11）
 ```
 
 推送代码时 GitHub Actions 会自动跑这些（见 `.github/workflows/ci.yml`）。
@@ -97,7 +102,8 @@ npx tsx tools/test-relay.mjs             # 中继协议（11）
 
 ### 自己开服务器（推荐，2 分钟）
 
-中继服务器只有一个文件 `server/index.js`（Node + `ws`），**不参与规则运算**，只负责「房间列表 + 消息转发」：
+中继服务器只有一个文件 `server/index.js`（Node + `ws`），**不参与规则运算**，只负责「房间列表 + 消息转发」，
+顺带用**同一个端口**分发增量更新文件（HTTP `/updates/*`，不用另开防火墙端口）：
 
 ```bash
 mkdir lycee-server && cd lycee-server
@@ -127,6 +133,53 @@ pm2 startup systemd       # 按提示执行它打印的那一行命令
 
 客户端连接顺序：`data/relay.txt` → 内置默认地址 → `127.0.0.1:9600`（本机调试）。
 本机调试也可以直接双击项目根目录的 `启动中继服务器.bat`。
+
+---
+
+## 增量更新 / Incremental updates
+
+**像网游一样：引擎只装一次，之后只下载改动的文件。**
+
+Electron 应用默认把代码打进安装包，改一行代码就要重下整个 190MB（而且 Electron 安装包是整体压缩，
+`blockmap` 差异下载几乎没效果）。本项目的做法是**把「引擎」和「内容」拆开**：
+
+| | 内容 | 更新方式 |
+|---|---|---|
+| 引擎 | Electron 运行时 + `bootstrap.js` 引导层 + 依赖（`resources/app/`） | 只有升级 Electron 时才换（重新装一次） |
+| 内容 | `dist/`（界面 + 卡牌数据 + 卡图）与 `dist-electron/`（主进程） | **只下载哈希变化的文件** |
+
+内容目录（安装版）：`%APPDATA%\lycee-overture-battle\app\current\`；首启时会从安装包自带的
+`resources/app/baseline/` 复制一份过去，之后所有更新都只作用于这一份。
+
+**服务器上放什么**：`updates-dist/manifest.json`（每个文件的 sha256 + 大小 + 地址）+ `files/<xx>/<sha256>` 文件实体。
+客户端启动后取清单 → 与自己记录的哈希对比 → **只下变化的文件** → 逐文件校验 sha256 →
+写入 `app/staged` → 下次启动由 `bootstrap.js` 在**最早期**原子替换（旧文件备份到 `app/prev`，
+连续两次启动失败自动回退，不会更新到一半变砖）。
+
+实测数字：**改一行代码 → 玩家端只下载 2 个文件 / 0.44 MB**；只新增一个文件 → 75 字节。
+卡图（`dist/images/*.png`，约 76MB）没变就永远不会重复下载。
+
+### 发布一个新版本（维护者）
+
+```bash
+# 1) 改版本号（package.json 的 version），然后构建 + 打包内容树
+npm run build
+node tools/pack-update.mjs            # 生成 baseline/ 与 updates-dist/，并打印"玩家端本次需下载 X MB"
+
+# 2) 上传到自己的服务器（只传这次变化的文件，通常几百 KB；脚本会自动建目录并校验版本）
+powershell -File tools/upload-updates.ps1 -Server ubuntu@你的服务器IP
+
+# 3) 新玩家才需要安装包（老玩家自动增量更新，不用发）
+npm run dist
+```
+
+服务器端用**和联机中继同一个端口**分发（HTTP `/updates/*`），不用另开防火墙端口；
+把 `updates-dist` 放到中继目录的上一级（或设环境变量 `UPDATES_DIR` 指过去），重启 `pm2 restart lycee-relay` 即可。
+
+客户端默认更新源：`data/update.txt`（一行 `http://IP:端口/updates/`）> 与中继同机同端口 > 内置默认地址。
+
+> 首次部署（0.21.0）：内容已经随安装包发出去了，所以**只需要上传 `manifest.json`**（几十 KB），
+> 111MB 的内容实体不用传到服务器上 —— 之后的每个版本才需要传差量。
 
 ---
 

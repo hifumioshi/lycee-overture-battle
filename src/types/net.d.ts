@@ -6,11 +6,14 @@ export type UpdateStatus =
   | { state: 'idle' }
   | { state: 'checking' }
   | { state: 'latest'; version: string }
-  | { state: 'available'; version: string }
-  | { state: 'downloading'; percent: number; version: string }
-  | { state: 'ready'; version: string }
+  | { state: 'available'; version: string; bytes?: number; files?: number }
+  | { state: 'downloading'; percent: number; version: string; got?: number; total?: number; files?: number }
+  | { state: 'ready'; version: string; bytes?: number; files?: number }
   | { state: 'error'; message: string }
   | { state: 'unsupported'; message: string };
+
+/** 更新方式说明（增量更新 = 只下载变化的文件；完整安装包 = 下载整个 Setup.exe） */
+export type UpdateMode = { incremental: boolean; contentVersion: string; appVersion: string };
 
 declare global {
   interface Window {
@@ -36,10 +39,11 @@ declare global {
     lyceeRelay: {
       url(): Promise<string>;
     };
-    /** 版本号 + 在线更新（安装版可自动更新；便携版会提示下载安装版） */
+    /** 版本号 + 在线更新（增量更新：只下载变化的文件；便携版会提示下载安装版） */
     lyceeApp: {
       version(): Promise<string>;
       updateStatus(): Promise<UpdateStatus>;
+      updateMode(): Promise<UpdateMode>;
       checkUpdate(): Promise<UpdateStatus>;
       installUpdate(): Promise<{ ok: boolean; message?: string }>;
       openReleases(): Promise<{ ok: boolean; message?: string }>;

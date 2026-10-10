@@ -37,8 +37,20 @@ jobs:
       - name: 语音行为接线测试
         run: npx tsx tools/test-voice-actions.ts
 
+      - name: 联机权限测试
+        run: npx tsx tools/test-perms.ts
+
+      - name: 选卡卡死回归测试
+        run: npx tsx tools/test-6960.ts
+
       - name: 中继协议测试
         run: npx tsx tools/test-relay.mjs
 
+      - name: 增量更新测试
+        run: npx tsx tools/test-incr-update.ts
+
       - name: 构建
         run: npm run build
+
+      - name: 打包内容树（增量更新清单）
+        run: node tools/pack-update.mjs

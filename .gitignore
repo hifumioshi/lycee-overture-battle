@@ -4,6 +4,10 @@ dist/
 dist-electron/
 release/
 
+# ===== 增量更新：安装包自带内容（大文件不入库）+ 文件实体（清单入库，便于算差量）=====
+baseline/
+updates-dist/files/
+
 # ===== 版权素材：卡图 / 语音 / 战歌（不入库，用 tools/download-cards.mjs 自行获取）=====
 data/images/
 data/voices/

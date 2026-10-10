@@ -1,19 +1,82 @@
-// Lycee Overture 联机中继服务器（大厅 + 房间 + 消息中转）
+// Lycee Overture 联机中继服务器（大厅 + 房间 + 消息中转 + 增量更新分发）
 // 用法：node server/index.js [端口]（默认 9600）
 // 房主仍是"游戏主机"（规则运算在房主客户端），本服务器只负责：
 //   · 房间列表（开房/加入）
 //   · 房间内消息中转（房主广播 ↔ 客机操作）
+//   · HTTP 静态分发 /updates/*（增量更新的清单与文件实体，与中继同端口，不用另开防火墙端口）
 // 房间内 cid 约定：房主 = -1（与客户端 room.ts 的 HOST_CID 一致），其他成员从 1 递增。
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { WebSocketServer } = require('ws');
 
 const HOST_CID = -1;
 
-function startRelay(port = 9600) {
+const MIME = {
+  '.json': 'application/json; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.html': 'text/html; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain; charset=utf-8',
+  '.bin': 'application/octet-stream',
+};
+
+function startRelay(port = 9600, opts = {}) {
   /** roomId -> { id, name, hostName, meta:{phase,players,spectators}, members: Map<cid, ws>, nextCid } */
   const rooms = new Map();
   let nextRoomId = 1;
 
-  const wss = new WebSocketServer({ port });
+  // 增量更新的静态目录（默认仓库里的 updates-dist；可用环境变量 UPDATES_DIR 覆盖）
+  const updatesDir = path.resolve(opts.updatesDir || process.env.UPDATES_DIR || path.join(__dirname, '..', 'updates-dist'));
+
+  /** 只允许读取 updatesDir 内的文件（防止 ../ 穿越） */
+  const safeJoin = (root, rel) => {
+    const p = path.resolve(root, rel.replace(/^\/+/, ''));
+    return p === root || p.startsWith(root + path.sep) ? p : null;
+  };
+
+  const httpServer = http.createServer((req, res) => {
+    const url = decodeURIComponent((req.url || '/').split('?')[0]);
+    if (req.method !== 'GET' && req.method !== 'HEAD') {
+      res.writeHead(405).end('method not allowed');
+      return;
+    }
+    if (url === '/' || url === '/health') {
+      res.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' });
+      res.end(`lycee-relay ok\nrooms=${rooms.size}\nupdates=${updatesDir}\n`);
+      return;
+    }
+    // 兼容 /updates/xxx 与 /xxx 两种写法（客户端默认用 /updates/）
+    const rel = url.startsWith('/updates/') ? url.slice('/updates/'.length) : url.slice(1);
+    const file = rel ? safeJoin(updatesDir, rel) : null;
+    if (!file || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+      res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' }).end('not found');
+      return;
+    }
+    const stat = fs.statSync(file);
+    const ext = path.extname(file).toLowerCase();
+    // 内容寻址的文件实体（files/<2位>/<sha256>）永不变化，可长期缓存；清单必须每次校验
+    const immutable = /[\\/]files[\\/]/.test(file);
+    res.writeHead(200, {
+      'content-type': MIME[ext] || 'application/octet-stream',
+      'content-length': stat.size,
+      'cache-control': immutable ? 'public, max-age=31536000, immutable' : 'no-store',
+      'access-control-allow-origin': '*',
+    });
+    if (req.method === 'HEAD') {
+      res.end();
+      return;
+    }
+    fs.createReadStream(file).pipe(res);
+  });
+
+  const wss = new WebSocketServer({ server: httpServer });
+  httpServer.listen(port);
 
   const send = (ws, obj) => {
     try {
@@ -178,11 +241,15 @@ function startRelay(port = 9600) {
   return {
     wss,
     rooms,
+    httpServer,
+    updatesDir,
     close: () =>
       new Promise((resolve) => {
         clearInterval(heartbeat);
         for (const ws of wss.clients) ws.terminate();
-        wss.close(() => resolve());
+        wss.close(() => {
+          httpServer.close(() => resolve());
+        });
       }),
   };
 }
@@ -191,6 +258,10 @@ module.exports = { startRelay, HOST_CID };
 
 if (require.main === module) {
   const port = Number(process.argv[2] || process.env.PORT || 9600);
-  startRelay(port);
+  const relay = startRelay(port);
   console.log(`[relay] Lycee 中继服务器已启动：ws://0.0.0.0:${port}`);
+  console.log(`[relay] 增量更新分发目录：${relay.updatesDir}（http://0.0.0.0:${port}/updates/manifest.json）`);
+  if (!fs.existsSync(path.join(relay.updatesDir, 'manifest.json'))) {
+    console.log('[relay] 提示：该目录还没有 manifest.json，先把本机 updates-dist 里的内容上传上去（见 README 的「发布更新」）。');
+  }
 }

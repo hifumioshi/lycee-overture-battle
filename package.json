@@ -1,17 +1,18 @@
 {
   "name": "lycee-overture-battle",
-  "version": "0.20.1",
+  "version": "0.21.0",
   "description": "Lycee Overture 网络对战平台（Win10 桌面版）",
   "private": true,
-  "main": "dist-electron/main.js",
+  "main": "bootstrap.js",
   "scripts": {
     "dev": "concurrently -k \"npm:dev:vite\" \"npm:dev:electron\"",
     "dev:vite": "vite",
     "dev:electron": "wait-on tcp:5173 && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron .",
     "build": "node -e \"require('fs').rmSync('dist-electron',{recursive:true,force:true})\" && tsc -p tsconfig.electron.json && vite build",
+    "pack:update": "node tools/pack-update.mjs",
     "start": "electron .",
-    "dist": "electron-builder --win nsis portable --publish never",
-    "dist:publish": "electron-builder --win nsis --publish always"
+    "dist": "npm run build && node tools/pack-update.mjs && electron-builder --win nsis portable --publish never",
+    "dist:publish": "npm run build && node tools/pack-update.mjs && electron-builder --win nsis --publish always"
   },
   "author": "lycee-fan",
   "license": "MIT",
@@ -20,8 +21,8 @@
     "productName": "Lycee Overture 对战平台",
     "asar": false,
     "files": [
-      "dist/**/*",
-      "dist-electron/**/*",
+      "bootstrap.js",
+      "baseline/**/*",
       "package.json"
     ],
     "directories": {

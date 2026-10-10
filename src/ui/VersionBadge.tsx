@@ -38,6 +38,12 @@ export default function VersionBadge() {
 
   let text = '';
   let extra: React.ReactNode = null;
+  const sizeText = (bytes?: number) => {
+    if (!bytes || bytes <= 0) return '';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / 1048576).toFixed(2)} MB`;
+  };
   switch (st.state) {
     case 'idle':
       text = '';
@@ -58,20 +64,26 @@ export default function VersionBadge() {
         </button>
       );
       break;
-    case 'available':
-      text = `发现新版本 v${st.version}，开始下载…`;
+    case 'available': {
+      const s = sizeText(st.bytes);
+      text = `发现新版本 v${st.version}${s ? `（需下载 ${s}${st.files ? ` / ${st.files} 个文件` : ''}）` : ''}，开始下载…`;
       break;
-    case 'downloading':
-      text = `正在下载新版本${st.version ? ` v${st.version}` : ''} ${st.percent}%`;
+    }
+    case 'downloading': {
+      const s = sizeText(st.total);
+      text = `正在下载新版本${st.version ? ` v${st.version}` : ''} ${st.percent}%${s ? `（共 ${s}）` : ''}`;
       break;
-    case 'ready':
-      text = `新版本 v${st.version} 已下载完成`;
+    }
+    case 'ready': {
+      const s = sizeText(st.bytes);
+      text = `新版本 v${st.version} 已下载完成${s ? `（${s}）` : ''}`;
       extra = (
         <button className="ver-btn primary" onClick={install}>
           🔄 立即重启并更新
         </button>
       );
       break;
+    }
     case 'error':
       text = `更新检查失败：${st.message}`;
       extra = (
