@@ -2051,10 +2051,9 @@ export function moveCharacter(gs: GameState, uid: string, row: RowName, area: Ar
     log(next, '已行动的角色无法使用移动类基本能力。');
     return next;
   }
-  if (inst.deployedTurn !== null && !eng.hasAggressive(next, uid)) {
-    log(next, '登场ターン制限中，无法使用移动类基本能力。');
-    return next;
-  }
+  // 注：移动类基本能力【不受】登场ターン制限 限制（アグレッシブ与否都能宣言）。
+  // 本回合登场的角色也可以宣言移动：对手照常得到对应宣言窗口，按后发先至结算。
+  // （登场ターン制限 只约束「攻击」与「[T] 费用支付」，见 canAttack / 费用支付处。）
   const key = `mv:${uid}:${next.turn}`;
   if ((next.players[p].perTurn[key] ?? 0) >= 1) {
     log(next, '该基本能力本回合已使用（1 回合 1 次）。');
