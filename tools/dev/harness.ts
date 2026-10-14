@@ -64,9 +64,9 @@ export const chance = (p: number): boolean => rng() < p;
 /* ---------------- 建局 ---------------- */
 
 /** 一局的标准起手流程（和界面上的顺序一致） */
-export function newMatch(seed: number): GameState {
+export function newMatch(seed: number, pool: Card[] = cards, deckIds?: string[]): GameState {
   void seed;
-  let gs = startGame(cards);
+  let gs = startGame(pool, deckIds, deckIds);
   gs = rules.markReady(gs);
   let guard = 0;
   while (gs.prompt?.kind === 'rps' && guard++ < 8) {

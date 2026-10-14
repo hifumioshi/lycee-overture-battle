@@ -48,6 +48,29 @@ const num = (name: string, def: number) => {
 };
 const has = (name: string) => argv.includes('--' + name);
 
+/**
+ * 按属性分卡组跑：--element 月 / 雪 / 花 / 日 / 宙 / 無（空 = 全部卡池）
+ * 测试卡表 = 该属性**每张卡 ×4**（临时不受"同编号 4 张 / 共 60 张"的构筑限制），
+ * 目的是尽量把该属性的卡都打出来。
+ * 注意：这只是构造一份卡表传给引擎，**不改 src/ 里正式游玩的构筑校验**
+ * （正式局仍然必须不多不少 60 张、同编号最多 4 张）。
+ */
+const elementArg = (() => {
+  const i = argv.indexOf('--element');
+  return i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('--') ? argv[i + 1] : '';
+})();
+const POOL = elementArg ? cards.filter((c) => (c.elements ?? '').includes(elementArg)) : cards;
+const DECK_IDS: string[] | undefined = (() => {
+  const i = argv.indexOf('--deck');
+  const wantAll = i >= 0 && argv[i + 1] === 'all4';
+  if (!elementArg && !wantAll) return undefined; // 默认走 60 张示例卡组
+  return POOL.flatMap((c) => [c.id, c.id, c.id, c.id]);
+})();
+
+// 覆盖率优先：把"还没成功使用过"的卡权重调高，否则 800 张卡组里纯随机很难碰到全部卡
+let uidToCard = new Map<string, string>();
+let uncoveredNow = new Set<string>();
+
 const GAMES = num('games', 20);
 const STEPS = num('steps', 250);
 const BASE_SEED = num('seed', 1);
@@ -69,6 +92,7 @@ const findings: Finding[] = [];
 const silentRejects = new Map<string, { count: number; example: Finding }>();
 const usedCards = new Set<string>();
 let stepsRun = 0;
+let staleOps = 0; // 参数引用的卡已不存在（机器人拿了过期引用 → 工具问题，不算游戏 bug）
 let accepted = 0;
 let rejected = 0;
 let gamesFinished = 0;
@@ -84,10 +108,17 @@ function addFinding(f: Finding): void {
 
 /** 抽签权重：让"结束回合"少一点，局才能打得久；取消类动作也压低 */
 function weightOf(op: Op): number {
-  if (op.action === 'endTurn') return 0.02;
-  if (op.action === 'endMainCancel' || op.action === 'cancelCostPay') return 0.05;
-  if (op.action === 'chooseMulligan') return 0.2;
-  return 1;
+  // 覆盖率优先：引用到"还没成功用过"的卡时提高权重
+  const touchesNew = op.args.some((a) => {
+    if (typeof a !== 'string') return false;
+    const cid = uidToCard.get(a);
+    return !!cid && uncoveredNow.has(cid);
+  });
+  const bias = touchesNew ? 6 : 1;
+  if (op.action === 'endTurn') return 0.02 * bias;
+  if (op.action === 'endMainCancel' || op.action === 'cancelCostPay') return 0.05 * bias;
+  if (op.action === 'chooseMulligan') return 0.2 * bias;
+  return bias;
 }
 
 function pickOp(ops: Op[]): Op {
@@ -120,7 +151,7 @@ function countField(gs: GameState): number {
 function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string } {
   const restore = installDeterminism(seed);
   randPick = makeBotPicker(seed);
-  let gs = newMatch(seed);
+  let gs = newMatch(seed, POOL, DECK_IDS);
   const ops: Op[] = [];
   let lastTurn = gs.turn;
   let lastProgress = 0;
@@ -133,6 +164,13 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
       break;
     }
     const cands = candidates(gs);
+    // 刷新"uid→卡号"与"尚未覆盖的卡"，供覆盖率优先的抽签权重使用
+    {
+      const a = gs.players[gs.turnPlayer];
+      uidToCard = new Map();
+      for (const c of [...a.hand, ...a.field.flat().filter(Boolean)]) uidToCard.set(c!.uid, c!.cardId);
+      uncoveredNow = new Set(POOL.filter((c) => !usedCards.has(c.id)).map((c) => c.id));
+    }
     if (cands.length === 0) {
       addFinding({
         kind: 'stuck-no-candidate',
@@ -145,6 +183,11 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
       break;
     }
     const op = pickOp(cands);
+    // 预判：动作参数引用的卡必须当前真的存在（手牌/场上），否则是机器人拿了过期引用（工具问题）
+    if (op.args.some((a) => typeof a === 'string' && /^c[0-9a-z]+_/.test(a) && cardIdOf(gs, a) === '?')) {
+      staleOps++;
+      continue;
+    }
     // 快照必须是深拷贝：引擎里有"就地修改传入状态"的函数（如 pushVoice 的注释所述），
     // 直接拿引用当下就会让"有没有变化"的判断失真，进而误报"静默失败"。
     const before = structuredClone(gs);
@@ -325,7 +368,7 @@ for (let g = 0; g < GAMES; g++) {
   if (ops.length > 0) {
     const restore = installDeterminism(seed);
     randPick = makeBotPicker(seed);
-    let gs2 = newMatch(seed);
+    let gs2 = newMatch(seed, POOL, DECK_IDS);
     let mapFail = false;
     for (const op of ops) {
       const real = denormalizeOp(op, uidOrder(gs2));
