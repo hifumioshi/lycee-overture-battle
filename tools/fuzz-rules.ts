@@ -142,7 +142,9 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
       break;
     }
     const op = pickOp(cands);
-    const before = gs;
+    // 快照必须是深拷贝：引擎里有"就地修改传入状态"的函数（如 pushVoice 的注释所述），
+    // 直接拿引用当下就会让"有没有变化"的判断失真，进而误报"静默失败"。
+    const before = structuredClone(gs);
     const after = applyOp(gs, op);
     const didChange = changed(before, after);
     stepsRun++;
@@ -229,8 +231,8 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
     if (didChange) noAccepted = 0;
     else noAccepted++;
     if (noAccepted > 60) {
-      // 救援：逐个试一遍候选动作，只要有一个能生效就说明不是卡死（避免"随机抽签抽不到唯一可行项"的假警报）
-      const rescue = cands.filter((c) => changed(gs, applyOp(gs, c)));
+      // 救援：逐个试一遍候选动作（在深拷贝上试，避免就地修改污染真实状态）
+      const rescue = cands.filter((c) => changed(gs, applyOp(structuredClone(gs), c)));
       if (rescue.length > 0) {
         noAccepted = 0;
       } else {
