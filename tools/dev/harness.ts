@@ -381,6 +381,36 @@ function collectUids(v: unknown, out: string[]): void {
   }
 }
 
+/** uid 的创建顺序（uid 形如 c<counter36>_<time36>），用于跨局/跨进程对齐"同一张卡" */
+export function uidOrder(gs: GameState): string[] {
+  const uids = [...uidsOf(gs, 0), ...uidsOf(gs, 1)];
+  const num = (u: string) => {
+    const m = /^c([0-9a-z]+)_/.exec(u);
+    return m ? parseInt(m[1], 36) : 0;
+  };
+  return uids.sort((a, b) => num(a) - num(b));
+}
+
+/** 把动作参数里的 uid 换成"第几张卡"（#i）：流水因此与 uid 计数器无关，可跨进程复现 */
+export function normalizeOp(op: Op, order: string[]): Op {
+  const table = new Map<string, string>();
+  order.forEach((u, i) => table.set(u, '#' + i));
+  const conv = (v: unknown): unknown =>
+    typeof v === 'string' ? (table.get(v) ?? v) : Array.isArray(v) ? v.map(conv) : v;
+  return { action: op.action, args: op.args.map(conv), label: op.label };
+}
+
+/** 回放时把 #i 还原成当前局面里第 i 张卡的 uid */
+export function denormalizeOp(op: Op, order: string[]): Op {
+  const conv = (v: unknown): unknown =>
+    typeof v === 'string' && /^#\d+$/.test(v)
+      ? (order[Number(v.slice(1))] ?? v)
+      : Array.isArray(v)
+        ? v.map(conv)
+        : v;
+  return { action: op.action, args: op.args.map(conv), label: op.label };
+}
+
 /** 动作参数里涉及的卡号（用于统计卡牌覆盖度） */
 export function ownCardIdOfArgs(gs: GameState, op: Op): string | null {
   for (const a of op.args) {

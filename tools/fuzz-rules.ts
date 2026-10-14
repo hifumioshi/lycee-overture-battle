@@ -30,6 +30,9 @@ import {
   negativeCounters,
   newMatch,
   ownCardIdOfArgs,
+  normalizeOp,
+  denormalizeOp,
+  uidOrder,
   projectKey,
   structuralKey,
   summarize,
@@ -250,7 +253,8 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
       }
     }
     gs = after;
-    ops.push(op);
+    // 记流水时把 uid 归一化成"第几张卡"（#i）：这样同进程/独立进程回放都能对上同一张卡
+    ops.push(normalizeOp(op, uidOrder(after)));
     if (findings.length >= MAX_FINDINGS) break;
   }
 
@@ -322,7 +326,7 @@ for (let g = 0; g < GAMES; g++) {
     const restore = installDeterminism(seed);
     randPick = makeBotPicker(seed);
     let gs2 = newMatch(seed);
-    for (const op of ops) gs2 = applyOp(gs2, op);
+    for (const op of ops) gs2 = applyOp(gs2, denormalizeOp(op, uidOrder(gs2)));
     const key2 = projectKey(gs2);
     if (key2 !== finalKey) {
       addFinding({
