@@ -141,7 +141,9 @@ export function candidates(gs: GameState): Op[] {
         const cands = pr.candidates;
         if (cands.length > 0) out.push({ action: 'confirmCostPay', args: [[cands[0].uid]], label: `付费（1 张 ${cands[0].name}）` });
         if (cands.length > 1) out.push({ action: 'confirmCostPay', args: [cands.map((c) => c.uid)], label: `付费（全部 ${cands.length} 张）` });
-        for (const c of cands.slice(0, 2)) out.push({ action: 'useCostAbilityInPay', args: [c.uid], label: `付费时用[コスト]能力 ${c.name}` });
+        // 注意：这里不盲试 useCostAbilityInPay。界面（Battlefield.tsx 的 pushCostAbility）只在卡确实有
+        // [コスト]能力、且未用过/未失去/满足 underCost 等条件时才显示按钮；
+        // 盲试每个候选会产生大量"静默失败"假报告。要精确镜像该判定留到第二期（复用界面的解析结果）。
         out.push({ action: 'cancelCostPay', args: [], label: '取消付费' });
         break;
       }
