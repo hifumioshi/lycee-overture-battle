@@ -22,6 +22,7 @@ data/cards/cards.json
 data/user-data/
 tools/data-backup/
 tools/_shots/
+tools/_fuzz/
 tools/rule-html/
 tools/rulebook-pages/
 public/cards.json

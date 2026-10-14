@@ -37,6 +37,9 @@ const version = String(argOf('version', pkg.version)).replace(/^v/, '');
 /** 参与增量更新的内容 = 渲染层产物 + 主进程产物 */
 const CONTENT_PARTS = ['dist', 'dist-electron'];
 
+/** 开发端隔离硬校验：内容树里只允许这两类目录，开发工具（tools/ 等）绝不允许进安装包或更新清单 */
+const ALLOWED_PREFIX = CONTENT_PARTS.map((p) => p + '/');
+
 const sha256 = (buf) => crypto.createHash('sha256').update(buf).digest('hex');
 const mb = (n) => (n / 1048576).toFixed(2) + ' MB';
 const kb = (n) => (n >= 1048576 ? mb(n) : (n / 1024).toFixed(1) + ' KB');
@@ -82,6 +85,13 @@ for (const part of CONTENT_PARTS) {
 }
 
 // ===== 2. 与上一个清单对比（玩家端要下载多少）=====
+// 先做开发端隔离校验：任何不属于 dist/ dist-electron/ 的路径都不允许被打进去
+for (const rel of Object.keys(files)) {
+  if (!ALLOWED_PREFIX.some((p) => rel.startsWith(p))) {
+    console.error(`✗ 打包内容里出现了不该出现的路径：${rel}（只允许 dist/ 与 dist-electron/，开发工具不能被玩家下载到）`);
+    process.exit(1);
+  }
+}
 const prevManifestPath = path.join(outDir, 'manifest.json');
 let prev = null;
 try {
