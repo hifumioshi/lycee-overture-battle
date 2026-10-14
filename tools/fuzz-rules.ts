@@ -163,7 +163,7 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
           step,
           op,
           promptKind: before.prompt?.kind ?? '无',
-          detail: '动作被拒绝但没有任何战报/提示文字 → 界面上表现为"点了没反应"',
+          detail: `动作被拒绝但没有任何战报/提示文字 → "点了没反应"（当时：行动方手牌 ${before.players[before.turnPlayer].hand.length} / 卡组 ${before.players[before.turnPlayer].deck.length} / 全场角色 ${before.players[0].field.flat().filter(Boolean).length + before.players[1].field.flat().filter(Boolean).length}）`,
           summary: summarize(before),
         };
         const hit = silentRejects.get(key);
