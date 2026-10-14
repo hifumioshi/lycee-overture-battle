@@ -171,8 +171,9 @@ function runGame(gameIdx: number, seed: number): { ops: Op[]; finalKey: string }
         }
       }
       gs = after;
-      ops.push(op);
-      // 被拒绝也算"没进展"
+      // 注意：这里不要 push（流水在循环末尾统一 push 一次）。
+      // 之前这里也 push 了一次，导致 300 步记成 ~600 条流水，回放时同一操作被应用两次，
+      // 于是出现假的"不可复现"报告。
       stuckSteps++;
     } else {
       accepted++;
