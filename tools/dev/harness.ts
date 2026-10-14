@@ -356,7 +356,11 @@ export function projectKey(gs: GameState): string {
 export function logDelta(before: GameState, after: GameState): string[] {
   const a = before.log ?? [];
   const b = after.log ?? [];
-  return b.length > a.length ? b.slice(a.length) : [];
+  if (b.length > a.length) return b.slice(a.length);
+  // 战报有 200 条上限（game.ts 的 pushLog）：满了以后追加一条会同时挤掉最老一条，
+  // 条数不变。只看长度会把"其实有新提示"误判成"静默拒绝"，所以这里再比末尾一条。
+  if (a.length > 0 && b.length > 0 && b[b.length - 1] !== a[a.length - 1]) return [b[b.length - 1]];
+  return [];
 }
 
 /** 某玩家当前所有卡牌实例的 uid 集合（含嵌套区域） */
