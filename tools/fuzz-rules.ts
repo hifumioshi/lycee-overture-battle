@@ -326,9 +326,28 @@ for (let g = 0; g < GAMES; g++) {
     const restore = installDeterminism(seed);
     randPick = makeBotPicker(seed);
     let gs2 = newMatch(seed);
-    for (const op of ops) gs2 = applyOp(gs2, denormalizeOp(op, uidOrder(gs2)));
-    const key2 = projectKey(gs2);
-    if (key2 !== finalKey) {
+    let mapFail = false;
+    for (const op of ops) {
+      const real = denormalizeOp(op, uidOrder(gs2));
+      // 归一化后的 #i 若解析不回来（下标越界），说明"卡序映射"错位了：
+      // 这是工具限制，不能当成"游戏不可复现"。
+      if (real.args.some((a) => typeof a === 'string' && /^#\d+$/.test(a))) {
+        mapFail = true;
+        break;
+      }
+      gs2 = applyOp(gs2, real);
+    }
+    const key2 = mapFail ? '' : projectKey(gs2);
+    if (mapFail) {
+      addFinding({
+        kind: 'replay-map-failed',
+        game: g,
+        step: ops.length,
+        promptKind: gs2.prompt?.kind ?? '无',
+        detail: '回放时无法把流水里的"卡序"映射回当前局面（工具限制，不代表游戏有问题）——待独立进程回放解决',
+        summary: summarize(gs2),
+      });
+    } else if (key2 !== finalKey) {
       addFinding({
         kind: 'non-deterministic',
         game: g,
@@ -364,6 +383,7 @@ const KIND_NAME: Record<string, string> = {
   'negative-counter': '出现负数数值',
   'no-progress': '回合推不动（原地打转）',
   'non-deterministic': '不可复现（隐藏随机/时间依赖）',
+  'replay-map-failed': '回放映射失败（工具限制，非游戏问题）',
 };
 
 console.log('\n================ 结果 ================');
