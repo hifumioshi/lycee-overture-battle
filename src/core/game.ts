@@ -551,10 +551,14 @@ export function shuffleDeck(gs: GameState, player: PlayerIndex): GameState {
   return next;
 }
 
+/** 战报条数上限（约 50KB）。战报属于游戏状态：每个动作都会深拷贝状态、重连/观战入场还要整份传输，
+ *  所以必须有界；但 200 条太短（一局还没打完早期战报就被挤掉了），放宽到 1000 条，够回翻一整局。 */
+export const LOG_MAX = 1000;
+
 /** 日志 */
 export function pushLog(gs: GameState, msg: string): GameState {
   const next: GameState = structuredClone(gs);
   next.log.push(msg);
-  if (next.log.length > 200) next.log.splice(0, next.log.length - 200);
+  if (next.log.length > LOG_MAX) next.log.splice(0, next.log.length - LOG_MAX);
   return next;
 }

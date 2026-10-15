@@ -432,6 +432,7 @@ const KIND_NAME: Record<string, string> = {
 console.log('\n================ 结果 ================');
 console.log(`用时 ${((Date.now() - t0) / 1000).toFixed(1)}s，执行 ${stepsRun} 步（生效 ${accepted} / 被拒 ${rejected}），打完 ${gamesFinished} 局`);
 console.log(`卡牌覆盖：${usedCards.size} / ${cards.length} 张成功使用过`);
+console.log('已覆盖卡号：' + [...usedCards].sort().join(','));
 
 if (findings.length === 0) {
   console.log('\n没有发现结构性问题 🎉（这不代表规则内容都正确，只说明没卡死/没漏牌/没分叉）');
