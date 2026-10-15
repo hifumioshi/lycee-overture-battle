@@ -166,33 +166,52 @@ export default function Battlefield({
 }) {
   const [gs, setGs] = useState<GameState>(() => startGame(cards, deck));
 
-  // 🧪 开发构建专用：单人测试模式（按 F2 打开全卡表检索，选中即加入手牌/直接上场）。
+  // 🧪 开发构建专用：单人测试模式（按 F2 打开/关闭全卡表检索）。
   // 正式构建里 VITE_DEV_TOOLS 为假：这段不执行，相关 chunk 也不产出（另有 check-release-clean 复核）。
   const devGsRef = useRef(gs);
+  const [devOpen, setDevOpen] = useState(false);
   useEffect(() => {
     devGsRef.current = gs;
   }, [gs]);
+  // F2 只切换状态（不用"闭包变量记住是否挂载"，那样在开发模式下容易因监听器重复注册而互相抵消）
   useEffect(() => {
     if (!import.meta.env.VITE_DEV_TOOLS) return;
-    let unmount: (() => void) | null = null;
-    const onKey = async (e: KeyboardEvent) => {
+    const w = window as unknown as { __lyceeDevKey?: boolean };
+    if (w.__lyceeDevKey) return; // 防止重复注册（热更新/双挂载）
+    w.__lyceeDevKey = true;
+    const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'F2') return;
       e.preventDefault();
-      if (unmount) {
-        unmount();
-        unmount = null;
-        return;
-      }
-      const m = await import('./dev/mountTestMode');
+      setDevOpen((v) => !v);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      w.__lyceeDevKey = false;
+    };
+  }, []);
+  // 状态驱动挂载/卸载：界面上的"关闭"按钮也会把状态置回 false
+  useEffect(() => {
+    if (!import.meta.env.VITE_DEV_TOOLS || !devOpen) return;
+    let dead = false;
+    let unmount: (() => void) | null = null;
+    void import('./dev/mountTestMode').then((m) => {
+      if (dead) return;
       unmount = m.mountTestMode({
         cards,
         getGs: () => devGsRef.current,
         apply: (fn: (g: never) => unknown) => setGs((cur) => fn(cur as never) as GameState),
+        onOpenChange: (open: boolean) => {
+          if (!open) setDevOpen(false);
+        },
       });
+    });
+    return () => {
+      dead = true;
+      unmount?.();
+      unmount = null;
     };
-    window.addEventListener('keydown', onKey);
-    return () => window.removeEventListener('keydown', onKey);
-  }, [cards]);
+  }, [devOpen, cards]);
   const [selected, setSelected] = useState<string | null>(null);
   const [hoverUid, setHoverUid] = useState<string | null>(null);
   const [moveModeUid, setMoveModeUid] = useState<string | null>(null); // 移动模式：选中要移动的角色
