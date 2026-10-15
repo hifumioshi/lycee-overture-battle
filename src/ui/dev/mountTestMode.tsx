@@ -31,19 +31,18 @@ export function mountTestMode(opts: MountOptions): () => void {
     root.render(
       <TestMode
         cards={opts.cards}
-        onPick={(cardId: string, target: TestModeTarget) =>
-          opts.apply(((gs: never) => {
-            // 动态 import 引擎侧沙盒辅助，保持与 UI 一致的"按需加载"
-            void import('../../core/devTest').then((m) => {
-              const cur = gs as never as Parameters<typeof m.devAddToHand>[0];
-              const next =
-                target === 'hand'
-                  ? m.devAddToHand(cur, cardId)
-                  : m.devPlaceCharacter(cur, cardId, 0, firstEmptyArea(cur));
-              opts.apply(() => next as never);
-            });
-          }) as never)
-        }
+        onPick={async (cardId: string, target: TestModeTarget) => {
+          // 注意：必须"先算出新状态、再 apply 一次"。
+          // 之前写成 opts.apply(() => { void import(...).then(...) }) —— 外层返回 undefined，
+          // 会把游戏状态设成 undefined，界面直接白掉。
+          const m = await import('../../core/devTest');
+          const cur = opts.getGs() as Parameters<typeof m.devAddToHand>[0];
+          const next =
+            target === 'hand'
+              ? m.devAddToHand(cur, cardId)
+              : m.devPlaceCharacter(cur, cardId, 0, firstEmptyArea(cur));
+          opts.apply(() => next as never);
+        }}
         onUntap={() =>
           void import('../../core/devTest').then((m) => {
             const cur = opts.getGs() as never as Parameters<typeof m.devUntapAll>[0];
