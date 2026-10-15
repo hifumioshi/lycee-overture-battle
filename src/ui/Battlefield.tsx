@@ -165,6 +165,34 @@ export default function Battlefield({
   playerName?: string;
 }) {
   const [gs, setGs] = useState<GameState>(() => startGame(cards, deck));
+
+  // 🧪 开发构建专用：单人测试模式（按 F2 打开全卡表检索，选中即加入手牌/直接上场）。
+  // 正式构建里 VITE_DEV_TOOLS 为假：这段不执行，相关 chunk 也不产出（另有 check-release-clean 复核）。
+  const devGsRef = useRef(gs);
+  useEffect(() => {
+    devGsRef.current = gs;
+  }, [gs]);
+  useEffect(() => {
+    if (!import.meta.env.VITE_DEV_TOOLS) return;
+    let unmount: (() => void) | null = null;
+    const onKey = async (e: KeyboardEvent) => {
+      if (e.key !== 'F2') return;
+      e.preventDefault();
+      if (unmount) {
+        unmount();
+        unmount = null;
+        return;
+      }
+      const m = await import('./dev/mountTestMode');
+      unmount = m.mountTestMode({
+        cards,
+        getGs: () => devGsRef.current,
+        apply: (fn: (g: never) => unknown) => setGs((cur) => fn(cur as never) as GameState),
+      });
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [cards]);
   const [selected, setSelected] = useState<string | null>(null);
   const [hoverUid, setHoverUid] = useState<string | null>(null);
   const [moveModeUid, setMoveModeUid] = useState<string | null>(null); // 移动模式：选中要移动的角色
