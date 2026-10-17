@@ -66,3 +66,92 @@ export function devFillHand(gs: GameState, n = 7, player: PlayerIndex = 0): Game
   const next = draw(gs, player, need);
   return pushLog(next, `【测试模式】补 ${need} 张手牌（目标 ${n} 张）。`);
 }
+
+/** 把一张卡放进卡组（默认放牌堆顶，方便检索类效果立刻找到） */
+export function devAddToDeck(
+  gs: GameState,
+  cardId: string,
+  opts: { count?: number; top?: boolean; player?: PlayerIndex } = {},
+): GameState {
+  const card: Card | undefined = gs.cardsById[cardId];
+  if (!card) return gs;
+  const player = opts.player ?? 0;
+  const count = opts.count ?? 1;
+  const next: GameState = structuredClone(gs);
+  for (let i = 0; i < count; i++) {
+    const inst = newInstance(cardId);
+    if (opts.top === false) next.players[player].deck.unshift(inst); // 牌堆底
+    else next.players[player].deck.push(inst); // 牌堆顶（数组末尾）
+  }
+  return pushLog(next, `【测试模式】把「${card.name}」×${count} 放进${player === 0 ? '我方' : '对方'}卡组。`);
+}
+
+/** 把一张卡放进垃圾箱 */
+export function devAddToTrash(gs: GameState, cardId: string, count = 1, player: PlayerIndex = 0): GameState {
+  const card: Card | undefined = gs.cardsById[cardId];
+  if (!card) return gs;
+  const next: GameState = structuredClone(gs);
+  for (let i = 0; i < count; i++) {
+    const inst = newInstance(cardId);
+    inst.faceUp = true;
+    next.players[player].trash.push(inst);
+  }
+  return pushLog(next, `【测试模式】把「${card.name}」×${count} 放进${player === 0 ? '我方' : '对方'}垃圾箱。`);
+}
+
+/** 把一张エリア（场地）卡放到我方场上指定位置 */
+export function devPlaceArea(
+  gs: GameState,
+  cardId: string,
+  row: 0 | 1,
+  area: 0 | 1 | 2,
+  player: PlayerIndex = 0,
+): GameState {
+  const card: Card | undefined = gs.cardsById[cardId];
+  if (!card) return gs;
+  const next: GameState = structuredClone(gs);
+  const inst = newInstance(cardId);
+  inst.faceUp = true;
+  next.players[player].fieldAreas[row][area] = inst;
+  return pushLog(next, `【测试模式】把エリア「${card.name}」放到${player === 0 ? '我方' : '对方'} ${row === 0 ? 'AF' : 'DF'}・${['左', '中', '右'][area]}。`);
+}
+
+/** 把卡组压到指定张数（测试"自己牌堆在 N 张以下"这类使用前提用） */
+export function devTrimDeck(gs: GameState, keep: number, player: PlayerIndex = 0): GameState {
+  const deck = gs.players[player].deck;
+  if (deck.length <= keep) return gs;
+  const next: GameState = structuredClone(gs);
+  next.players[player].deck = next.players[player].deck.slice(next.players[player].deck.length - Math.max(0, keep));
+  return pushLog(next, `【测试模式】把${player === 0 ? '我方' : '对方'}卡组压到 ${Math.max(0, keep)} 张。`);
+}
+
+/** 把双方场上/手牌/弃牌都清干净（每张卡单独测时用，避免互相干扰） */
+export function devResetBoard(gs: GameState): GameState {
+  const next: GameState = structuredClone(gs);
+  for (const p of [0, 1] as PlayerIndex[]) {
+    const pl = next.players[p];
+    const keepDeck = pl.deck;
+    pl.hand = [];
+    pl.trash = [];
+    pl.shield = [];
+    pl.special = [];
+    pl.field = [
+      [null, null, null],
+      [null, null, null],
+    ];
+    pl.fieldAreas = [
+      [null, null, null],
+      [null, null, null],
+    ];
+    pl.removed = [];
+    pl.storage = {};
+    pl.exPool = [];
+    pl.perTurn = {};
+    pl.turnCounters = {};
+    pl.deck = keepDeck;
+  }
+  next.prompt = null;
+  next.battle = null;
+  next.response = null;
+  return pushLog(next, '【测试模式】清空场面（保留卡组）。');
+}

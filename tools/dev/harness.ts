@@ -103,8 +103,11 @@ export function candidates(gs: GameState): Op[] {
   const p = actorOf(gs);
   const pr = gs.prompt;
   const out: Op[] = [];
-  const own = gs.players[p];
-  const opp: PlayerIndex = p === 0 ? 1 : 0;
+  // 兜底：promptOwner 可能返回非 0/1（例如 gameover 之类），越界时回退到回合玩家，别让工具崩掉
+  const p2: PlayerIndex = gs.players[p] ? p : gs.turnPlayer;
+  const own = gs.players[p2];
+  const opp: PlayerIndex = p2 === 0 ? 1 : 0;
+  void p;
 
   if (pr) {
     switch (pr.kind) {
