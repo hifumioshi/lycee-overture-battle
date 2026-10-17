@@ -1433,6 +1433,15 @@ export default function Battlefield({
     // 移动模式下点击其他卡会取消移动
     if (moveModeUid) setMoveModeUid(null);
     if (deploySlotUid) setDeploySlotUid(null);
+    // 对方手牌不可见：联机时不允许选中它（否则二级菜单会把卡号/卡名泄露出来）
+    if (mode !== 'local') {
+      const loc0 = findInstance(gs, uid);
+      if (loc0 && loc0.zone === 'hand' && loc0.player !== myPlayer) {
+        setSelected(null);
+        setMenuPos(null);
+        return;
+      }
+    }
     setSelected((s) => (s === uid ? null : uid));
     // 在卡片旁边弹出操作菜单（起手换牌期间只查看，不弹菜单）
     if (gs.mulligan) {
