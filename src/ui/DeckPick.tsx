@@ -37,7 +37,7 @@ export default function DeckPick({
 
         <div className="deck-select-grid">
           {decks.length === 0 && (
-            <div className="deck-select-empty">还没有保存的卡组，可先用随机测试牌组，或去「卡组制作」构建。</div>
+            <div className="deck-select-empty">还没有保存的卡组，请先去「卡组制作」构建一副 60 张的卡组。</div>
           )}
 
           {decks.map((d) => (
@@ -61,15 +61,6 @@ export default function DeckPick({
               </div>
             </button>
           ))}
-
-          <button
-            className={`deck-select-card random${current === '随机测试牌组' ? ' picked' : ''}`}
-            onClick={() => onPick({ deckName: '随机测试牌组', ids: [], song: '', voice: '' })}
-          >
-            <div className="deck-select-random-icon">🎲</div>
-            <div className="deck-select-name">随机测试牌组</div>
-            <div className="deck-select-count">系统自动生成 60 张</div>
-          </button>
         </div>
 
         <div className="deck-pick-note">选好后点「准备」，双方都准备好就会自动开始对局。</div>

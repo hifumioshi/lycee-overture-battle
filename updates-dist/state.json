@@ -1,9 +1,10 @@
 {
-  "version": "0.21.2",
+  "version": "0.21.3",
   "files": {
     "dist/assets/index-97vIky2_.css": "3c36b2eb30cb874b2289fbc58671e65df7f2192ec6b7c3b33e1eaefcabd5aa92",
     "dist/assets/index-B9oB2vrO.js": "829bd81b5da23cf487061e85918b16e7965b149b6b5898d594f7db805ce387e5",
     "dist/assets/index-B_jxuxNk.js": "4022b2999ef0af648d97ba5cf0aab56142befe1849bd631ad5e8b9f09631714c",
+    "dist/assets/index-CWZntwze.js": "ca2391ecc18c2dc313519bf3e6525434a38feab3a5fa90e68a9be9d7c53e72b4",
     "dist/assets/index-DUt28yuB.js": "d1685b6a32179bb47a264cd05146bb38efa769192a3de516617eb6a2b4ee4e11",
     "dist/assets/index-JAWxsdBq.js": "e4c57726555ae5da14ad1cc85dcfde794a68965502e75e3da320b52f41c9df08",
     "dist/cards.json": "bff32ae4ce0f816b904e08938eed512995f90e5a9256a8a92e03346b13a8c16b",
@@ -215,7 +216,7 @@
     "dist/images/LO-6969.png": "667a616dfef748679f0bb60b1d3560ddd1fb5c688690d43d5f4827f1cf3b672f",
     "dist/images/LO-6971-A.png": "13279ab4b05135cdd23cbac560fe1c5f9e6bae196dae13d247270be4c9a2d447",
     "dist/images/LO-6971.png": "f65c84ad8c45fa9d66c8ccd396324ae6c326dfe80edc9b7edb8bda9a432d85d8",
-    "dist/index.html": "d73cf6f3adc5e076914859ce8b823b63b466fc642806be0b10ec5735b77ac2ee",
+    "dist/index.html": "d1fda13334e819cab22eea6f1be56d9c29781761f2f7bcb28ff9d9966f93f9b9",
     "dist-electron/incrUpdate.js": "d3d04c9cd321971249104ad08154985e10e4601adf24a45c83b055edf14c556c",
     "dist-electron/main.js": "d6da9aebd86f9a206595463e30007ba553dd2c7bd125dbb6e43cf62a558dcf82",
     "dist-electron/preload.js": "16d3798228d3be7842c583f490c82bb7de13ad4c62c9a3d627798013aa485b19"
