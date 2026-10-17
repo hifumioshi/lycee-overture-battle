@@ -8,7 +8,7 @@
  *      （这些在引擎里没有对应 action，属于界面层；这里断言协议动作表里没有 toggle 类动作名）
  */
 import { cards, installDeterminism, newMatch, candidates, applyOp, changed, type Op } from './dev/harness';
-import { guestActDenied, applyAction } from '../src/net/protocol';
+import { guestActDenied, applyAction, rateLimited } from '../src/net/protocol';
 import type { GameState } from '../src/core/game';
 import { devAddToHand, devPlaceCharacter } from '../src/core/devTest';
 
@@ -117,6 +117,34 @@ function hostTurn(): GameState {
   ];
   const bad = actionNames.filter((n) => TOGGLE_LIKE.test(n));
   ok(bad.length === 0, '联机协议动作表里没有横置/翻面类动作', bad.join(','));
+}
+
+/* ---------- D：操作频率限制 ---------- */
+{
+  const now = 1_000_000;
+  // 1 秒内第 11 个操作被拒
+  let stamps: number[] = [];
+  let rejected = 0;
+  for (let i = 0; i < 12; i++) {
+    const r = rateLimited(stamps, now + i * 10); // 120ms 内连发 12 个
+    stamps = r.stamps;
+    if (r.limited) rejected++;
+  }
+  ok(rejected === 2, '1 秒内第 11、12 个操作被拒（实际拒绝 ' + rejected + ' 个）');
+
+  // 窗口滑过后恢复
+  const after = rateLimited(stamps, now + 2000);
+  ok(after.limited === false, '窗口滑过后恢复正常');
+
+  // 慢速操作不会误伤（每 200ms 一个，1 秒内只有 5 个）
+  let slow: number[] = [];
+  let slowRejected = 0;
+  for (let i = 0; i < 10; i++) {
+    const r = rateLimited(slow, now + i * 200);
+    slow = r.stamps;
+    if (r.limited) slowRejected++;
+  }
+  ok(slowRejected === 0, '每 200ms 一个操作不会被误判为过频');
 }
 
 console.log('\n结果：' + pass + ' 通过，' + fail + ' 失败');

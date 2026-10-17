@@ -19,7 +19,7 @@ import { getParsed } from '../core/effectEngine';
 import { effectiveStats as engStats } from '../core/effectEngine';
 import { hasHandDeclare, hasDeclare, hasMoveAbility } from '../core/abilities';
 import * as rules from '../core/rules';
-import { applyAction, canGuestAct, guestActDenied, promptOwner, NetAction, NetState, NetHash, NetAck, NetOp, NetRevReport, NetDesync, NetDesyncReport, NetRoomState, NetMode } from '../net/protocol';
+import { applyAction, canGuestAct, guestActDenied, promptOwner, rateLimited, NetAction, NetState, NetHash, NetAck, NetOp, NetRevReport, NetDesync, NetDesyncReport, NetRoomState, NetMode } from '../net/protocol';
 import * as relay from '../net/relay';
 import { foldersOf, pickVariant } from '../core/voice';
 import { encodeState, decodeState, resetEncode, resetDecode, packetSize, fullSize, stateHash, stateSlotHashes, hashHex, divergentSlots, currentRev, currentSeq, currentDecodeRev } from '../net/gsSync';
@@ -244,6 +244,8 @@ export default function Battlefield({
   const [pendingLabel, setPendingLabel] = useState<string>(''); // 等待房主确认的提示文字
   const guestRevReportAtRef = useRef(0);
   const doneOpIdsRef = useRef<string[]>([]); // 房主：处理过的 opId（去重，防连点/重发双执行）
+  const opStampsRef = useRef(new Map<number, number[]>()); // 房主：每个客机最近的 op 时间戳（频率限制用）
+  const myOpStampsRef = useRef<number[]>([]); // 客机：自己最近发出的 op 时间戳（本地节流用）
   const guestRevRef = useRef<{ rev: number; hash: number }>({ rev: -1, hash: 0 });
   const hashMismatchAtRef = useRef(0);
   const [alignMsg, setAlignMsg] = useState<string | null>(null); // "已自动对齐"等提示
@@ -617,6 +619,13 @@ export default function Battlefield({
 
   /** 客机 → 房主：带确认的操作 */
   const sendOp = (action: string, args: unknown[], label?: string) => {
+    // 本地节流：1 秒内最多发 10 个操作（狂点时界面直接提示，不发出去；房主侧还有权威兜底）
+    const rlLocal = rateLimited(myOpStampsRef.current, Date.now());
+    myOpStampsRef.current = rlLocal.stamps;
+    if (rlLocal.limited) {
+      setAlignMsg('操作太频繁，请稍等一下再点');
+      return;
+    }
     opSeqRef.current += 1;
     const opId = `${Date.now().toString(36)}-${opSeqRef.current}`;
     pendingOpsRef.current.set(opId, { label: label ?? action, at: Date.now(), resent: false });
@@ -754,6 +763,24 @@ export default function Battlefield({
             return;
           }
           doneOpIdsRef.current = [...doneOpIdsRef.current, opId].slice(-60);
+          // 权威侧频率限制：同一客机 1 秒内超过 10 个操作 → 拒绝（客户端被改坏也拦得住）
+          {
+            const stamps = opStampsRef.current.get(id) ?? [];
+            const rl = rateLimited(stamps, Date.now());
+            opStampsRef.current.set(id, rl.stamps);
+            if (rl.limited) {
+              pushPktLog(`✗ 拒绝操作 ${m.action}：操作太频繁`);
+              relay.sendTo(id, {
+                type: 'ack',
+                opId,
+                ok: false,
+                rev: currentRev(),
+                reason: 'rate',
+                message: '操作太频繁，请稍候',
+              } satisfies NetAck);
+              return;
+            }
+          }
           const seatIdx = next.seat1?.cid === id ? 0 : next.seat2?.cid === id ? 1 : -1;
           const before = gsLiveRef.current;
           if (next.phase !== 'playing') {

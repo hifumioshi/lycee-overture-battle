@@ -1,6 +1,6 @@
 {
   "name": "lycee-overture-battle",
-  "version": "0.21.0",
+  "version": "0.21.1",
   "description": "Lycee Overture 网络对战平台（Win10 桌面版）",
   "private": true,
   "main": "bootstrap.js",

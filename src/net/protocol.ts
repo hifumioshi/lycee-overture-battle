@@ -269,6 +269,22 @@ function turnOrWindowOk(gs: GameState, action: string, guestPlayer: PlayerIndex)
   return false;
 }
 
+/**
+ * 客机操作频率限制（滑动窗口，纯函数便于单测）：
+ * 最近 windowMs 内的操作数达到 max 就拒绝本次，并返回保留的时间戳列表。
+ * 房主侧用它兜底：即使客户端被改成无限狂发，也拦得住。
+ */
+export function rateLimited(
+  stamps: number[],
+  now: number,
+  windowMs = 1000,
+  max = 10,
+): { limited: boolean; stamps: number[] } {
+  const recent = stamps.filter((t) => now - t < windowMs && t <= now);
+  if (recent.length >= max) return { limited: true, stamps: recent };
+  return { limited: false, stamps: [...recent, now] };
+}
+
 /** 提示归属玩家（谁需要做决定）：-1 表示双方都看（如 gameover） */
 export function promptOwner(
   prompt: GameState['prompt'],
