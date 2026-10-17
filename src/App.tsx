@@ -57,14 +57,15 @@ export default function App() {
     setView('battle');
   };
 
-  // 🧪 开发构建专用：单人测试模式（沙盒）。
-  // 正式构建里 VITE_DEV_TOOLS 为假，这段会被常量折叠掉，不会进产物（另有 check-release-clean 复核）。
-  const devTools = !!import.meta.env.VITE_DEV_TOOLS;
-  const enterSandbox = () => {
-    setDeck(cards.map((c) => c.id)); // 沙盒卡组：全卡表各 1 张（不受 60 张 / 同编号 4 张限制）
-    setDeckSong('');
-    enterBattle('local' as NetMode);
-  };
+  // 通用调试钩子（不含任何开发端功能代码）：允许外部用指定卡组直接开一局本地对局。
+  // 正式版里没有任何 UI 调用它；开发构建的开发入口（src/dev/entry.tsx）用它进沙盒对局。
+  useEffect(() => {
+    (window as unknown as { __lyceeDebugStart?: (ids?: string[]) => void }).__lyceeDebugStart = (ids?: string[]) => {
+      setDeck(ids && ids.length > 0 ? ids : cards.map((c) => c.id));
+      setDeckSong('');
+      enterBattle('local' as NetMode);
+    };
+  }, [cards]);
 
   return (
     <div className="app">
@@ -79,7 +80,6 @@ export default function App() {
           onMultiplayer={() => setView('multi')}
           onDeckBuilder={() => setView('deck')}
           onGallery={() => setView('gallery')}
-          onDevTest={devTools ? enterSandbox : undefined}
         />
       )}
 
