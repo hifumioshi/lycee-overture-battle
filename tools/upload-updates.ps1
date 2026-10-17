@@ -1,35 +1,38 @@
-# 把增量更新文件上传到自己的服务器（只传新变化的部分，通常几百 KB）
+# Upload incremental-update files to your own server (only changed files, usually a few hundred KB).
 #
-# 用法：
+# Usage:
 #   powershell -File tools/upload-updates.ps1 -Server ubuntu@62.234.140.123
 #   powershell -File tools/upload-updates.ps1 -Server ubuntu@62.234.140.123 -RemoteDir '~/updates-dist'
-#   powershell -File tools/upload-updates.ps1 -Server ... -All     # 强制全量上传（第一次部署用得上）
+#   powershell -File tools/upload-updates.ps1 -Server ... -All      # upload everything (first deploy)
 #
-# 依赖 Windows 自带的 OpenSSH（Win10 1809+ 默认带 scp/ssh）。第一次连接会问 yes/no，再输密码。
+# Requires OpenSSH client (Windows 10 1809+ ships scp/ssh). It will ask for your password.
 
 param(
   [Parameter(Mandatory = $true)][string]$Server,
   [string]$RemoteDir = '~/updates-dist',
-  [string]$LocalDir = "$PSScriptRoot\..\updates-dist",
+  [string]$LocalDir = '',
   [switch]$All
 )
 
 $ErrorActionPreference = 'Stop'
+# NOTE: $PSScriptRoot is NOT available inside param() defaults on Windows PowerShell 5.1,
+# so resolve the local folder here in the body instead.
+if (-not $LocalDir) { $LocalDir = Join-Path (Split-Path -Parent $PSScriptRoot) 'updates-dist' }
 $LocalDir = (Resolve-Path $LocalDir).Path
 
 if (-not (Get-Command scp -ErrorAction SilentlyContinue)) {
-  Write-Host '✗ 找不到 scp：请在「设置 → 应用 → 可选功能」里安装 OpenSSH 客户端' -ForegroundColor Red
+  Write-Host '[!] scp not found. Install OpenSSH Client: Settings - Apps - Optional features.' -ForegroundColor Red
   exit 1
 }
 
-# 1. 决定要传哪些文件
+# 1) decide which files to upload
 $files = @()
 if ($All) {
   $files = Get-ChildItem $LocalDir -Recurse -File | ForEach-Object { $_.FullName.Substring($LocalDir.Length + 1) }
 } elseif (Test-Path (Join-Path $LocalDir 'upload-list.txt')) {
   $files = Get-Content (Join-Path $LocalDir 'upload-list.txt') | Where-Object { $_.Trim() -ne '' }
 } else {
-  Write-Host '✗ 找不到 upload-list.txt，请先运行：npm run pack:update' -ForegroundColor Red
+  Write-Host '[!] upload-list.txt not found. Run: npm run pack:update' -ForegroundColor Red
   exit 1
 }
 
@@ -41,25 +44,25 @@ foreach ($f in $files) {
     $total += (Get-Item $abs).Length
     $paths += $abs
   } else {
-    Write-Host "  (跳过不存在的文件：$f)" -ForegroundColor DarkYellow
+    Write-Host "  (skip missing: $f)" -ForegroundColor DarkYellow
   }
 }
 $sizeText = if ($total -ge 1MB) { '{0:N2} MB' -f ($total / 1MB) } else { '{0:N1} KB' -f ($total / 1KB) }
-Write-Host "准备上传 $($paths.Count) 个文件，共 $sizeText → $Server`:$RemoteDir" -ForegroundColor Cyan
-if ($paths.Count -eq 0) { Write-Host '没有需要上传的文件。'; exit 0 }
+Write-Host "Uploading $($paths.Count) file(s), total $sizeText -> ${Server}:$RemoteDir" -ForegroundColor Cyan
+if ($paths.Count -eq 0) { Write-Host 'Nothing to upload.'; exit 0 }
 
-# 2. 在服务器上建好目录（scp 不会自动建多级目录）
+# 2) create remote directories (scp does not create them)
 $dirs = @($RemoteDir)
 foreach ($f in $files) {
   $sub = Split-Path ($f -replace '/', '\') -Parent
   if ($sub) { $dirs += "$RemoteDir/$($sub -replace '\\', '/')" }
 }
 $dirs = $dirs | Sort-Object -Unique
-Write-Host '在服务器上创建目录…' -ForegroundColor DarkGray
+Write-Host 'Creating remote directories...' -ForegroundColor DarkGray
 & ssh $Server "mkdir -p $($dirs -join ' ')"
-if ($LASTEXITCODE -ne 0) { Write-Host '✗ ssh 建目录失败（检查地址/密码/防火墙）' -ForegroundColor Red; exit 1 }
+if ($LASTEXITCODE -ne 0) { Write-Host '[!] ssh mkdir failed (check address/password/firewall)' -ForegroundColor Red; exit 1 }
 
-# 3. 逐个上传（按目录分组，保留相对路径）
+# 3) upload file by file, grouped by directory
 foreach ($d in $dirs) {
   $rel = $d.Substring($RemoteDir.Length).TrimStart('/')
   $srcDir = if ($rel) { Join-Path $LocalDir ($rel -replace '/', '\') } else { $LocalDir }
@@ -67,17 +70,17 @@ foreach ($d in $dirs) {
   $names = @()
   foreach ($p in $paths) { if ((Split-Path $p -Parent) -eq $srcDir) { $names += $p } }
   if ($names.Count -eq 0) { continue }
-  Write-Host "  上传 $rel ($($names.Count) 个)…" -ForegroundColor DarkGray
-  & scp @names "$Server`:$d/"
-  if ($LASTEXITCODE -ne 0) { Write-Host "✗ 上传失败：$rel" -ForegroundColor Red; exit 1 }
+  Write-Host "  upload $rel ($($names.Count) file(s))..." -ForegroundColor DarkGray
+  & scp @names "${Server}:$d/"
+  if ($LASTEXITCODE -ne 0) { Write-Host "[!] upload failed: $rel" -ForegroundColor Red; exit 1 }
 }
 
-# 4. 校验服务器上的清单版本
-Write-Host '校验服务器上的清单…' -ForegroundColor DarkGray
+# 4) verify remote manifest version
+Write-Host 'Verifying remote manifest...' -ForegroundColor DarkGray
 $localVer = (Get-Content (Join-Path $LocalDir 'manifest.json') -Raw | ConvertFrom-Json).version
-$remoteVer = (& ssh $Server "head -c 200 $RemoteDir/manifest.json" | Out-String)
-if ($remoteVer -match [regex]::Escape($localVer)) {
-  Write-Host "✓ 上传完成，服务器上的内容版本已是 v$localVer" -ForegroundColor Green
+$remoteHead = (& ssh $Server "head -c 200 $RemoteDir/manifest.json" | Out-String)
+if ($remoteHead -match [regex]::Escape($localVer)) {
+  Write-Host "[OK] Done. Remote content version is v$localVer" -ForegroundColor Green
 } else {
-  Write-Host "⚠ 上传完成，但没能确认服务器清单版本（本地是 v$localVer），请手动检查一次" -ForegroundColor Yellow
+  Write-Host "[!] Uploaded, but could not confirm the remote version (local is v$localVer). Check manually." -ForegroundColor Yellow
 }

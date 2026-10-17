@@ -46,6 +46,19 @@ export default function App() {
     (window as unknown as { __activeDeck?: string[] }).__activeDeck = deck;
   }, [deck]);
 
+  // 通用调试钩子（不含任何开发端功能代码）：允许外部用指定卡组直接开一局本地对局。
+  // 正式版里没有任何 UI 调用它；开发构建的开发入口（src/dev/entry.tsx）用它进沙盒对局。
+  // 注意：必须在下面的提前 return 之前（hook 不能写在条件分支后面，否则 React 会报 #310 白屏）。
+  useEffect(() => {
+    (window as unknown as { __lyceeDebugStart?: (ids?: string[]) => void }).__lyceeDebugStart = (ids?: string[]) => {
+      setDeck(ids && ids.length > 0 ? ids : (cards ?? []).map((c) => c.id));
+      setDeckSong('');
+      setBattleInit({ mode: 'local' });
+      setBattleSeq((n) => n + 1);
+      setView('battle');
+    };
+  }, [cards]);
+
   const changeName = (n: string) => setPlayerNameState(setPlayerName(n));
 
   if (error) return <div className="loading-box">⚠️ 卡牌数据加载失败：{error}</div>;
@@ -56,16 +69,6 @@ export default function App() {
     setBattleSeq((n) => n + 1);
     setView('battle');
   };
-
-  // 通用调试钩子（不含任何开发端功能代码）：允许外部用指定卡组直接开一局本地对局。
-  // 正式版里没有任何 UI 调用它；开发构建的开发入口（src/dev/entry.tsx）用它进沙盒对局。
-  useEffect(() => {
-    (window as unknown as { __lyceeDebugStart?: (ids?: string[]) => void }).__lyceeDebugStart = (ids?: string[]) => {
-      setDeck(ids && ids.length > 0 ? ids : cards.map((c) => c.id));
-      setDeckSong('');
-      enterBattle('local' as NetMode);
-    };
-  }, [cards]);
 
   return (
     <div className="app">
